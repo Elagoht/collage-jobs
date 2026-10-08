@@ -183,7 +183,9 @@ With `app.ListenAndServe()`, the plugin needs nothing more:
    - Each queue with items left logs at Warn `jobs: dropped queued items`,
      with the queue's name and the count. An item waiting for a retry when
      the runs' ctx ends counts as dropped too; it is not a failure, so
-     `OnFailure` is not called.
+     `OnFailure` is not called. After a give-up, `abandoned` counts the items
+     whose runs were still going: they may yet finish, but nothing waits for
+     them.
 
 On a signal, `ShutdownTimeout` starts when the drain ends, so it has to cover
 the requests in flight and the queues. A ctx you pass to `app.Shutdown(ctx)`
@@ -203,8 +205,8 @@ nothing. A `Shutdown` before the plugin started returns at once.
 ### Serving with your own server
 
 collage calls `OnServe` only from `ListenAndServe`. An application that runs
-its own `http.Server` over `app.Handler()` starts the plugin with `Start(ctx)`,
-cancels that ctx when its server starts to drain, and calls `app.Shutdown` after
+its own `http.Server` over `app.Handler()` starts the plugin with `Start(ctx)`
+once the server is listening, cancels that ctx when its server starts to drain, and calls `app.Shutdown` after
 the server has stopped, so that the plugin's `Shutdown` finishes the queues.
 The plugin's `Init` must have run first, which `app.Handler()` or `app.Start()`
 does; `Start` panics otherwise.
@@ -213,10 +215,14 @@ does; `Start` panics otherwise.
 if err := app.Start(); err != nil { // runs Init
 	return err
 }
-srv := &http.Server{Addr: ":8080", Handler: app.Handler()}
+ln, err := net.Listen("tcp", ":8080")
+if err != nil {
+	return err
+}
+srv := &http.Server{Handler: app.Handler()}
+go srv.Serve(ln)
 ctx, stopJobs := context.WithCancel(context.Background())
-j.Start(ctx)
-go srv.ListenAndServe()
+j.Start(ctx) // the port is bound: start the jobs
 
 // On shutdown:
 stopJobs()                // the drain: no more triggers, Enqueue refused

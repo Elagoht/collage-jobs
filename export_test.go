@@ -66,3 +66,13 @@ func (c *fakeClock) NextDue() time.Time {
 
 // NewMemStore returns the in-memory store, holding up to capacity items.
 func NewMemStore[T any](capacity int) Store[T] { return newMemStore[T](capacity) }
+
+// WrapStore replaces q's store with wrap's result. Call it before the plugin
+// starts.
+func WrapStore[T any](q *Queue[T], wrap func(Store[T]) Store[T]) { q.store = wrap(q.store) }
+
+// Closed reports whether Shutdown has begun, without taking p.mu.
+func Closed(p *Plugin) bool { return p.closed.Load() }
+
+// Active returns how many loops, runs and workers of p are counted.
+func Active(p *Plugin) int { return p.active.Count() }

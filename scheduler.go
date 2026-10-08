@@ -99,6 +99,9 @@ func nextTrigger(s schedule, loc *time.Location, now, last time.Time) time.Time 
 
 // trigger starts a run of j, or skips it if one is in progress.
 func (p *Plugin) trigger(j *Job) {
+	if p.closed.Load() {
+		return // Shutdown has begun, and stops the loops next
+	}
 	if !j.busy.CompareAndSwap(false, true) {
 		p.log.Debug("jobs: skipped, the previous run is still in progress", "job", j.name)
 		return

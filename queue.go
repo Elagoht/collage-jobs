@@ -55,9 +55,10 @@ type worker interface {
 	// finish tells the workers that Shutdown has begun: they stop once the
 	// store is empty.
 	finish()
-	// dropped returns how many items were never handled: those left in the
-	// store and those cut short in a retry's wait.
-	dropped() int64
+	// leftovers returns how many items were dropped, left in the store or
+	// cut short in a retry's wait, and, if Shutdown gave up, how many were
+	// abandoned while running.
+	leftovers(gaveUp bool) (dropped, abandoned int64)
 	queueName() string
 }
 
@@ -122,7 +123,15 @@ func (q *Queue[T]) startWorkers(workCtx context.Context) {
 
 func (q *Queue[T]) finish() { q.stopIfEmpty() }
 
-func (q *Queue[T]) dropped() int64 { return int64(q.store.Len()) + q.cutShort.Load() }
+func (q *Queue[T]) leftovers(gaveUp bool) (dropped, abandoned int64) {
+	queued := int64(q.store.Len())
+	if gaveUp {
+		// unfinished counts the queued items and those still running; one
+		// cut short has stopped counting.
+		abandoned = max(q.unfinished.Load()-queued, 0)
+	}
+	return queued + q.cutShort.Load(), abandoned
+}
 
 func (q *Queue[T]) queueName() string { return q.name }
 
@@ -175,7 +184,10 @@ func (q *Queue[T]) handle(ctx context.Context, item T) {
 			}
 			// Shutdown ended the runs' ctx before the retry. The item is
 			// dropped, as a queued one is, not failed: Shutdown counts it, and
-			// OnFailure is not called.
+			// OnFailure is not called. With no attempt left, as always with
+			// MaxAttempts 1, a failure is final even when the cancel caused
+			// it: it is logged at Error and handed to OnFailure, below.
+			log.Debug("jobs: dropped at shutdown, not retried", "queue", q.name, "attempt", attempt, "duration", took, "error", err)
 			q.cutShort.Add(1)
 			return
 		}

@@ -20,7 +20,15 @@ const (
 
 // dropped returns the count logged by the dropped Warn for queue, and whether
 // one was logged at all.
-func (l *logs) dropped(queue string) (int64, bool) {
+func (l *logs) dropped(queue string) (int64, bool) { return l.dropAttr(queue, "count") }
+
+// abandoned returns the abandoned count logged by the dropped Warn for queue,
+// and whether one was logged at all.
+func (l *logs) abandoned(queue string) (int64, bool) { return l.dropAttr(queue, "abandoned") }
+
+// dropAttr returns the integer attribute key of the dropped Warn for queue,
+// and whether one was logged at all.
+func (l *logs) dropAttr(queue, key string) (int64, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, r := range l.recs {
@@ -28,18 +36,18 @@ func (l *logs) dropped(queue string) (int64, bool) {
 			continue
 		}
 		var name string
-		var count int64
+		var v int64
 		r.Attrs(func(a slog.Attr) bool {
 			switch a.Key {
 			case "queue":
 				name = a.Value.String()
-			case "count":
-				count = a.Value.Int64()
+			case key:
+				v = a.Value.Int64()
 			}
 			return true
 		})
 		if name == queue {
-			return count, true
+			return v, true
 		}
 	}
 	return 0, false
@@ -163,8 +171,8 @@ func TestShutdown_DropsAndLogs(t *testing.T) {
 	cancel() // the drain
 
 	took, _ := shutdown(t, p, 100*time.Millisecond)
-	if took > 3*time.Second {
-		t.Fatalf("Shutdown took %v", took)
+	if took >= time.Second {
+		t.Fatalf("Shutdown took %v, as long as the give-up: it did not return once the cancelled run did", took)
 	}
 	if !sawCancel.Load() {
 		t.Fatal("the running handler's ctx was not cancelled")
@@ -180,19 +188,22 @@ func TestShutdown_DropsAndLogs(t *testing.T) {
 }
 
 // A run that ignores its ctx cannot hang Shutdown: it gives up a second after
-// cancelling, and says so.
+// cancelling, and says so. The stuck run's item is logged as abandoned, beside
+// the queued one dropped behind it.
 func TestShutdown_IgnoringJobDoesNotHang(t *testing.T) {
 	p := jobs.New()
-	entered := make(chan struct{})
+	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	q := jobs.NewQueue(p, "stubborn", func(context.Context, int) error {
-		close(entered)
+		entered <- struct{}{}
 		<-release
 		return nil
 	}, jobs.QueueOptions[int]{})
 	l, _ := setup(t, p, "")
-	if err := q.Enqueue(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	for i := range 2 {
+		if err := q.Enqueue(context.Background(), i); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.Start(ctx)
@@ -203,7 +214,24 @@ func TestShutdown_IgnoringJobDoesNotHang(t *testing.T) {
 		expectIdle(t, p)
 	}()
 
-	took, _ := shutdown(t, p, 100*time.Millisecond)
+	type result struct{ took time.Duration }
+	res := make(chan result, 1)
+	go func() {
+		sctx, done := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer done()
+		began := time.Now()
+		if err := p.Shutdown(sctx); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+		res <- result{time.Since(began)}
+	}()
+	var took time.Duration
+	select {
+	case r := <-res:
+		took = r.took
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown hung on a run that ignores its ctx")
+	}
 	if took > 3*time.Second {
 		t.Fatalf("Shutdown took %v", took)
 	}
@@ -212,6 +240,12 @@ func TestShutdown_IgnoringJobDoesNotHang(t *testing.T) {
 	}
 	if n := l.count(slog.LevelWarn, gaveUpMsg, ""); n != 1 {
 		t.Fatalf("the give-up was logged %d times, want 1", n)
+	}
+	if n, ok := l.abandoned("stubborn"); !ok || n != 1 {
+		t.Fatalf("dropped Warn logged %v with abandoned %d, want 1: the stuck run's item", ok, n)
+	}
+	if n, _ := l.dropped("stubborn"); n != 1 {
+		t.Fatalf("dropped count %d, want 1: the item queued behind the stuck run", n)
 	}
 }
 
@@ -223,7 +257,7 @@ func TestShutdown_BeforeStart(t *testing.T) {
 	p.Every("tick", time.Millisecond, r.fn).RunOnStart()
 	var handled atomic.Int32
 	q := jobs.NewQueue(p, "early", func(context.Context, int) error { handled.Add(1); return nil }, jobs.QueueOptions[int]{})
-	setup(t, p, "")
+	l, _ := setup(t, p, "")
 	if err := q.Enqueue(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +273,14 @@ func TestShutdown_BeforeStart(t *testing.T) {
 		t.Fatal("Shutdown before Start did not return")
 	}
 
+	if n, ok := l.dropped("early"); !ok || n != 1 {
+		t.Fatalf("dropped Warn logged %v with count %d, want 1: the item queued before Shutdown", ok, n)
+	}
+
 	p.Start(context.Background())
+	if n := jobs.Active(p); n != 0 {
+		t.Fatalf("%d goroutines started by Start after Shutdown, want 0", n)
+	}
 	// A job or worker started by mistake would run on a goroutine that may not
 	// have been scheduled yet; waiting on real time can only miss that bug,
 	// never fail a correct plugin.
@@ -372,5 +413,59 @@ func TestShutdown_EnqueueRace(t *testing.T) {
 		if a, h := accepted.Load(), handled.Load(); a != h+dropped {
 			t.Fatalf("round %d: %d accepted, %d handled, %d logged dropped: %d lost unlogged", round, a, h, dropped, a-h-dropped)
 		}
+	}
+}
+
+// heldStore holds the first Push until release closes.
+type heldStore struct {
+	jobs.Store[int]
+	inPush, release chan struct{}
+	once            atomic.Bool
+}
+
+func (s *heldStore) Push(item int) error {
+	if s.once.CompareAndSwap(false, true) {
+		close(s.inPush)
+		<-s.release
+	}
+	return s.Store.Push(item)
+}
+
+// An Enqueue held inside its push holds Shutdown off: the item is handled or
+// counted dropped, never accepted and lost. Deterministic where
+// TestShutdown_EnqueueRace is a soak.
+func TestShutdown_EnqueueHeldInPush(t *testing.T) {
+	p := jobs.New()
+	var handled atomic.Int64
+	q := jobs.NewQueue(p, "held", func(context.Context, int) error { handled.Add(1); return nil }, jobs.QueueOptions[int]{})
+	hs := &heldStore{inPush: make(chan struct{}), release: make(chan struct{})}
+	jobs.WrapStore(q, func(s jobs.Store[int]) jobs.Store[int] { hs.Store = s; return hs })
+	l, _ := setup(t, p, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+
+	enq := make(chan error, 1)
+	go func() { enq <- q.Enqueue(context.Background(), 1) }()
+	<-hs.inPush
+	shut := make(chan struct{})
+	go func() { _ = p.Shutdown(context.Background()); close(shut) }()
+	// Correct code: Shutdown waits on the lock the push holds, so it cannot
+	// close the plugin. If it does, let it finish before the push lands. The
+	// bounded wait can only miss the bug, never fail a correct plugin.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && !jobs.Closed(p) {
+		time.Sleep(time.Millisecond)
+	}
+	if jobs.Closed(p) {
+		<-shut
+	}
+	close(hs.release)
+	err := <-enq
+	<-shut
+	expectIdle(t, p)
+	dropped, _ := l.dropped("held")
+	if err == nil && handled.Load()+dropped != 1 {
+		t.Fatalf("Enqueue accepted the item, but %d handled and %d logged dropped", handled.Load(), dropped)
 	}
 }

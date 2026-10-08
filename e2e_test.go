@@ -77,6 +77,9 @@ func TestBuild_RunsNothing(t *testing.T) {
 	if n, h := r.n.Load(), handled.Load(); n != 0 || h != 0 {
 		t.Fatalf("the build ran the job %d times and handled %d items", n, h)
 	}
+	if n := jobs.Active(p); n != 0 {
+		t.Fatalf("%d goroutines started by the build, want 0", n)
+	}
 
 	// The build did initialise the plugin, so the check above is not vacuous.
 	defer func() {

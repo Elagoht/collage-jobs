@@ -252,13 +252,17 @@ const giveUp = time.Second
 // returns. Such a run's goroutine lives on until the function returns, but the
 // plugin keeps no goroutine of its own waiting for it.
 //
-// Last, each queue that still has items logs at Warn how many were dropped:
-// those left in the store, and those waiting for a retry when the runs' ctx
-// ended, which are dropped rather than failed, so OnFailure is not called.
-// The store is in memory, so dropped items are lost.
+// Last, each queue that still has items logs at Warn "jobs: dropped queued
+// items". Its count is the items dropped: those left in the store, and those
+// waiting for a retry when the runs' ctx ended, which are dropped rather than
+// failed, so OnFailure is not called. Its abandoned is, after a give-up, the
+// items whose runs were still going: they may yet finish, but nothing waits
+// for them. The store is in memory, so dropped items are lost.
 //
 // Shutdown always returns nil. Before the plugin has started it returns at
-// once, logging the items that were queued and never handled.
+// once, logging the items that were queued and never handled. Only the first
+// call does anything: a second, even one made while the first is still
+// waiting, returns nil at once without waiting for it.
 func (p *Plugin) Shutdown(ctx context.Context) error {
 	p.mu.Lock()
 	if p.closed.Load() {
@@ -272,31 +276,34 @@ func (p *Plugin) Shutdown(ctx context.Context) error {
 	queues := p.queues
 	p.mu.Unlock()
 
+	gaveUp := false
 	if started {
 		p.stopLoops()
 		for _, q := range queues {
 			q.finish()
 		}
-		p.wait(ctx)
+		gaveUp = p.wait(ctx)
 	}
 	if p.log == nil {
 		return nil // Init never ran, so there is no logger
 	}
 	for _, q := range queues {
-		if n := q.dropped(); n > 0 {
-			p.log.Warn("jobs: dropped queued items", "queue", q.queueName(), "count", n)
+		dropped, abandoned := q.leftovers(gaveUp)
+		if dropped > 0 || abandoned > 0 {
+			p.log.Warn("jobs: dropped queued items", "queue", q.queueName(), "count", dropped, "abandoned", abandoned)
 		}
 	}
 	return nil
 }
 
 // wait waits for every loop, run and worker to end, or for ctx to end. Then it
-// cancels the runs' ctx and waits up to giveUp more.
-func (p *Plugin) wait(ctx context.Context) {
+// cancels the runs' ctx and waits up to giveUp more. It reports whether it
+// gave up.
+func (p *Plugin) wait(ctx context.Context) bool {
 	defer p.cancelWork()
 	select {
 	case <-p.active.Idle():
-		return
+		return false
 	case <-ctx.Done():
 	}
 	p.cancelWork()
@@ -304,8 +311,12 @@ func (p *Plugin) wait(ctx context.Context) {
 	defer timer.Stop()
 	select {
 	case <-p.active.Idle():
+		return false
 	case <-timer.C:
-		p.log.Warn("jobs: gave up waiting for runs that ignore their ctx", "running", p.active.Count(), "waited", giveUp)
+		// goroutines counts what is still going: the stuck runs, and for a
+		// queue's item, the worker running it.
+		p.log.Warn("jobs: gave up waiting for runs that ignore their ctx", "goroutines", p.active.Count(), "waited", giveUp)
+		return true
 	}
 }
 
