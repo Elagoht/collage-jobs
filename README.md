@@ -185,8 +185,9 @@ With `app.ListenAndServe()`, the plugin needs nothing more:
      the runs' ctx ends counts as dropped too; it is not a failure, so
      `OnFailure` is not called.
 
-So a stop can take `DrainDelay` plus the time the queues need; give
-`ShutdownTimeout`, or your ctx, enough for both. See collage's
+On a signal, `ShutdownTimeout` starts when the drain ends, so it has to cover
+the requests in flight and the queues. A ctx you pass to `app.Shutdown(ctx)`
+covers the drain too, so give it at least `DrainDelay` plus that. See collage's
 [deployment guide](https://github.com/Elagoht/collage/blob/main/docs/deployment.md)
 for the stop sequence.
 

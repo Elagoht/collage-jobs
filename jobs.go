@@ -35,7 +35,10 @@ type Plugin struct {
 	cfg   Config
 	clock clock
 
-	// mu guards names, scheduled, queues, inited and running.
+	// mu guards names, scheduled, queues, inited and running, and the write
+	// of closed. Enqueue checks for the drain and pushes under it, and start
+	// launches everything under it, so Shutdown, which sets closed under it,
+	// sees each of them either done in full or not begun.
 	mu        sync.Mutex
 	names     map[string]bool // every job and queue name taken
 	scheduled []*Job
