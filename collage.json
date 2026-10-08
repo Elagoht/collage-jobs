@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/jobs",
+  "description": "Package jobs runs scheduled jobs and typed background queues, only while the application serves, and finishes queued work on shutdown.",
+  "repository": "https://github.com/Elagoht/collage-jobs",
+  "config": {
+    "type": "object",
+    "description": "Package jobs runs scheduled jobs and typed background queues, only while the application serves, and finishes queued work on shutdown.",
+    "properties": {
+      "disabled": {
+        "type": "array",
+        "description": "names of scheduled jobs that do not run; an unknown name fails startup",
+        "items": {
+          "type": "string"
+        }
+      },
+      "timezone": {
+        "type": "string",
+        "description": "IANA time zone cron expressions are read in, default \"UTC\""
+      }
+    },
+    "additionalProperties": false
+  }
+}
