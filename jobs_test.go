@@ -36,7 +36,7 @@ func (l *logs) Handle(_ context.Context, r slog.Record) error {
 }
 
 // count returns how many records have level and msg and, if job is not empty,
-// a "job" attribute equal to it.
+// a "job" or "queue" attribute equal to it.
 func (l *logs) count(level slog.Level, msg, job string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -50,7 +50,7 @@ func (l *logs) count(level slog.Level, msg, job string) int {
 			continue
 		}
 		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "job" && a.Value.String() == job {
+			if (a.Key == "job" || a.Key == "queue") && a.Value.String() == job {
 				n++
 				return false
 			}

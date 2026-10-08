@@ -1,10 +1,11 @@
 # elagoht/jobs
 
 A collage plugin that runs scheduled jobs, on an interval or a cron expression,
-only while the application serves. Nothing runs in `collage build`, in CLI
-commands, or in tests that only call `app.Handler()` or `app.Start()`: jobs start when
-`ListenAndServe` has bound its port, and stop being triggered when the drain
-begins.
+and typed background queues, only while the application serves. Nothing runs
+in `collage build`, in CLI commands, or in tests that only call
+`app.Handler()` or `app.Start()`: jobs and queue workers start when
+`ListenAndServe` has bound its port, and jobs stop being triggered when the
+drain begins.
 
 > **Every instance runs its own scheduled jobs.** With N replicas behind a load
 > balancer, a job runs N times per trigger. There is no leader election. If a
@@ -97,6 +98,52 @@ A `*/15 * * * *` job follows the wall clock, so its real-time spacing is not
 `Every(name, 15*time.Minute, fn)`. An interval is measured in elapsed time,
 from the moment the previous trigger fired. Neither DST, the time zone nor a
 wall clock set back or forward changes it.
+
+## Background queues
+
+A queue hands typed items to a function in the background. The payload type is
+the queue's type parameter, so there is no `any` and no type assertion:
+
+```go
+type Email struct{ To, Subject string }
+
+mail := jobs.NewQueue(j, "email", func(ctx context.Context, m Email) error {
+	return send(ctx, m)
+}, jobs.QueueOptions[Email]{Workers: 2, MaxAttempts: 3})
+
+// In a handler:
+if err := mail.Enqueue(r.Context(), Email{To: to}); err != nil {
+	// jobs.ErrQueueFull or jobs.ErrDraining: tell the user to try again
+}
+```
+
+| Option | Default | |
+| --- | --- | --- |
+| `Workers` | `1` | How many items are handled at the same time |
+| `Capacity` | `1000` | How many items can wait. `Enqueue` on a full queue returns `ErrQueueFull` |
+| `MaxAttempts` | `1` | How many times an item is tried. `1` means no retry |
+| `OnFailure` | none | `func(ctx, item, err)`, called once with the last error when every attempt has failed |
+
+How queues behave:
+
+- **Enqueue never blocks.** It returns `ErrQueueFull` when the queue holds
+  `Capacity` items, and `ErrDraining` once the drain has begun. An item is
+  either queued or refused with an error, never silently dropped.
+- **Before serving**, items wait in the queue. The workers start with the
+  scheduled jobs, in `OnServe` or `Start`, so nothing is handled in
+  `collage build`, CLI commands or tests that never serve.
+- **Retries.** An error or a panic is a failed attempt. A failed attempt with
+  attempts left is logged at Warn, and the same worker retries the item after
+  1s, 2s, 4s… capped at a minute. A worker keeps its items in order, and
+  handles nothing else while it waits. The last failure is logged at Error and
+  `OnFailure` is called; a panic in `OnFailure` is logged and contained.
+- **Logging.** A handled item is logged at Debug with the queue's name, the
+  attempt and the duration.
+- **Storage.** Items live in memory, behind the `Store[T]` interface
+  (`Push`, `Pop`, `Len`). They are lost if the process ends.
+
+Queue misuse panics: an empty name, a name taken by a job or another queue, a
+nil function, a negative option, or a queue defined after `Init`.
 
 ## Configuration
 

@@ -9,7 +9,8 @@ import (
 
 // start runs once, for the first of OnServe and Start. It keeps ctx as the
 // serve ctx, makes the ctx every run derives from, and starts one loop per
-// enabled scheduled job, unless ctx is already done.
+// enabled scheduled job, unless ctx is already done, and every queue's workers
+// in any case.
 func (p *Plugin) start(ctx context.Context) {
 	p.mu.Lock()
 	inited := p.inited
@@ -22,7 +23,7 @@ func (p *Plugin) start(ctx context.Context) {
 		p.running = ctx
 		p.loopCtx, p.stopLoops = context.WithCancel(ctx)
 		p.workCtx, p.cancelWork = context.WithCancel(context.Background())
-		scheduled := p.scheduled
+		scheduled, queues := p.scheduled, p.queues
 		p.mu.Unlock()
 
 		// A drain that began before the server got to serve starts no
@@ -36,6 +37,9 @@ func (p *Plugin) start(ctx context.Context) {
 				p.wg.Add(1)
 				go p.loop(p.loopCtx, j)
 			}
+		}
+		for _, q := range queues {
+			q.startWorkers()
 		}
 	})
 }

@@ -41,3 +41,27 @@ func Busy(p *Plugin) bool {
 	}
 	return false
 }
+
+// QueueLen returns how many items wait in q's store.
+func QueueLen[T any](q *Queue[T]) int { return q.store.Len() }
+
+// Unfinished returns how many items handed to q are not yet handled: queued,
+// running or waiting for a retry.
+func Unfinished[T any](q *Queue[T]) int64 { return q.unfinished.Load() }
+
+// Backoff is backoff.
+var Backoff = backoff
+
+// NextDue returns when the earliest timer whose waiter's ctx is live falls
+// due, or the zero time if there is none.
+func (c *fakeClock) NextDue() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var due time.Time
+	for _, t := range c.timers {
+		if t.ctx.Err() == nil && (due.IsZero() || t.at.Before(due)) {
+			due = t.at
+		}
+	}
+	return due
+}

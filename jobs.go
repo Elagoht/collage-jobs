@@ -35,10 +35,11 @@ type Plugin struct {
 	cfg   Config
 	clock clock
 
-	// mu guards names, scheduled, inited and running.
+	// mu guards names, scheduled, queues, inited and running.
 	mu        sync.Mutex
 	names     map[string]bool // every job and queue name taken
 	scheduled []*Job
+	queues    []worker
 	inited    bool // Init succeeded: no more definitions
 
 	// Set by Init, read-only afterwards.
@@ -58,7 +59,7 @@ type Plugin struct {
 	// the end of Shutdown.
 	workCtx    context.Context
 	cancelWork context.CancelFunc
-	// wg counts every scheduler loop, run and worker.
+	// wg counts every scheduler loop, run and queue worker.
 	wg sync.WaitGroup
 }
 
@@ -206,7 +207,7 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	return nil
 }
 
-// OnServe starts the scheduled jobs. collage calls it once the server listens;
+// OnServe starts the scheduled jobs and the queues' workers. collage calls it once the server listens;
 // ctx ends when the drain begins, and from then on no job starts. Only the
 // first of OnServe and Start does anything.
 func (p *Plugin) OnServe(ctx context.Context) { p.start(ctx) }
