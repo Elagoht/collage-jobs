@@ -26,11 +26,8 @@ var ErrDraining = errors.New("jobs: draining")
 
 // Config configures the plugin.
 type Config struct {
-	// Timezone is the IANA time zone cron expressions are read in, default
-	// "UTC".
-	Timezone string `json:"timezone"`
-	// Disabled names scheduled jobs that do not run.
-	Disabled []string `json:"disabled"`
+	Timezone string   `json:"timezone"` // IANA time zone cron expressions are read in, default "UTC"
+	Disabled []string `json:"disabled"` // names of scheduled jobs that do not run; an unknown name fails startup
 }
 
 // Plugin is the jobs plugin.

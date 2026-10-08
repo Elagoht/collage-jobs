@@ -18,11 +18,11 @@ func TestEvery_TriggersOnSchedule(t *testing.T) {
 	serve(t, p, clk, 1)
 
 	clk.Advance(59 * time.Second)
-	expectRuns(t, &r, 0)
+	expectRuns(t, p, &r, 0)
 	clk.Advance(time.Second)
-	expectRuns(t, &r, 1)
-	clk.Advance(2 * time.Minute)
-	expectRuns(t, &r, 3)
+	expectRuns(t, p, &r, 1)
+	step(t, p, clk, time.Minute, 2)
+	expectRuns(t, p, &r, 3)
 }
 
 func TestCron_UsesTimezone(t *testing.T) {
@@ -36,13 +36,13 @@ func TestCron_UsesTimezone(t *testing.T) {
 	serve(t, p, clk, 1)
 
 	clk.Advance(29 * time.Minute)
-	expectRuns(t, &r, 0)
+	expectRuns(t, p, &r, 0)
 	clk.Advance(time.Minute) // 03:00 in Istanbul, 00:00 UTC
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 	clk.Advance(23 * time.Hour)
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 	clk.Advance(time.Hour)
-	expectRuns(t, &r, 2)
+	expectRuns(t, p, &r, 2)
 }
 
 func TestCron_UTCByDefault(t *testing.T) {
@@ -53,9 +53,9 @@ func TestCron_UTCByDefault(t *testing.T) {
 	serve(t, p, clk, 1)
 
 	clk.Advance(3*time.Hour - time.Minute)
-	expectRuns(t, &r, 0)
+	expectRuns(t, p, &r, 0)
 	clk.Advance(time.Minute)
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 }
 
 // Review Focus 1: a trigger that fires while the previous run is still in
@@ -63,9 +63,9 @@ func TestCron_UTCByDefault(t *testing.T) {
 func TestEvery_SkipsWhileRunning(t *testing.T) {
 	p := jobs.New()
 	release := make(chan struct{})
-	var entered runs
+	entered := make(chan struct{}, 4)
 	p.Every("slow", time.Minute, func(ctx context.Context) error {
-		entered.n.Add(1)
+		entered <- struct{}{}
 		<-release
 		return nil
 	})
@@ -77,21 +77,32 @@ func TestEvery_SkipsWhileRunning(t *testing.T) {
 			close(release)
 		}
 	})
+	const skipped = "jobs: skipped, the previous run is still in progress"
 
 	clk.Advance(time.Minute)
-	expectRuns(t, &entered, 1)
+	<-entered
+	// The loop logs a skip before it arms again, and Advance waits for that.
 	clk.Advance(time.Minute)
 	clk.Advance(time.Minute)
-	expectRuns(t, &entered, 1)
-	if n := l.count(slog.LevelDebug, "jobs: skipped, the previous run is still in progress", "slow"); n != 2 {
+	if n := len(entered); n != 0 {
+		t.Fatalf("entered %d more times while the first run was in progress", n)
+	}
+	if n := l.count(slog.LevelDebug, skipped, "slow"); n != 2 {
 		t.Fatalf("%d skips logged, want 2", n)
 	}
 
 	close(release)
 	released = true
-	eventually(t, func() bool { return l.count(slog.LevelDebug, "jobs: ran", "slow") == 1 }, "the run to finish")
+	eventually(t, func() bool { return !jobs.Busy(p) }, "the run to finish")
 	clk.Advance(time.Minute)
-	expectRuns(t, &entered, 2)
+	<-entered
+	eventually(t, func() bool { return !jobs.Busy(p) }, "the second run to finish")
+	if n := len(entered); n != 0 {
+		t.Fatalf("entered %d extra times", n)
+	}
+	if n := l.count(slog.LevelDebug, skipped, "slow"); n != 2 {
+		t.Fatalf("%d skips logged after the release, want 2", n)
+	}
 }
 
 func TestRunOnStart(t *testing.T) {
@@ -100,9 +111,9 @@ func TestRunOnStart(t *testing.T) {
 	p.Every("warm", time.Hour, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
 	serve(t, p, clk, 1)
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 	clk.Advance(time.Hour)
-	expectRuns(t, &r, 2)
+	expectRuns(t, p, &r, 2)
 }
 
 func TestTimeout(t *testing.T) {
@@ -141,13 +152,19 @@ func TestFailureAndPanic(t *testing.T) {
 	l, clk := setup(t, p, "")
 	serve(t, p, clk, 1)
 
-	clk.Advance(time.Minute)
-	eventually(t, func() bool { return l.count(slog.LevelError, "jobs: failed", "flaky") == 1 }, "the error log")
-	clk.Advance(time.Minute)
-	eventually(t, func() bool { return l.count(slog.LevelError, "jobs: failed", "flaky") == 2 }, "the panic log")
-	clk.Advance(time.Minute)
-	eventually(t, func() bool { return l.count(slog.LevelDebug, "jobs: ran", "flaky") == 1 }, "a run after the panic")
-	expectRuns(t, &calls, 3) // not retried
+	step(t, p, clk, time.Minute, 1)
+	if n := l.count(slog.LevelError, "jobs: failed", "flaky"); n != 1 {
+		t.Fatalf("%d error logs after the error, want 1", n)
+	}
+	step(t, p, clk, time.Minute, 1)
+	if n := l.count(slog.LevelError, "jobs: failed", "flaky"); n != 2 {
+		t.Fatalf("%d error logs after the panic, want 2", n)
+	}
+	step(t, p, clk, time.Minute, 1)
+	if n := l.count(slog.LevelDebug, "jobs: ran", "flaky"); n != 1 {
+		t.Fatalf("%d successful runs after the panic, want 1", n)
+	}
+	expectRuns(t, p, &calls, 3) // not retried
 }
 
 func TestCron_NeverAgain(t *testing.T) {
@@ -160,7 +177,7 @@ func TestCron_NeverAgain(t *testing.T) {
 		return l.count(slog.LevelWarn, "jobs: the schedule has no next time; the job stops", "feb30") == 1
 	}, "the warning")
 	clk.Advance(24 * 365 * time.Hour)
-	expectRuns(t, &r, 0)
+	expectRuns(t, p, &r, 0)
 	if n := clk.Pending(); n != 0 {
 		t.Fatalf("%d timers pending, want 0", n)
 	}
@@ -175,7 +192,7 @@ func TestNothingBeforeServe(t *testing.T) {
 	p.Every("tick", time.Minute, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
 	clk.Advance(time.Hour)
-	expectRuns(t, &r, 0)
+	expectRuns(t, p, &r, 0)
 	if n := clk.Pending(); n != 0 {
 		t.Fatalf("%d timers pending before serving, want 0", n)
 	}
@@ -192,10 +209,10 @@ func TestDrainStopsScheduling(t *testing.T) {
 	cancel := serve(t, p, clk, 1)
 
 	clk.Advance(time.Minute)
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 	cancel()
 	clk.Advance(time.Hour)
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 }
 
 func TestOnServe_CtxAlreadyDone(t *testing.T) {
@@ -208,7 +225,7 @@ func TestOnServe_CtxAlreadyDone(t *testing.T) {
 	p.OnServe(ctx)
 	t.Cleanup(func() { stop(t, p, cancel) })
 	clk.Advance(time.Hour)
-	expectRuns(t, &r, 0)
+	expectRuns(t, p, &r, 0)
 }
 
 func TestStartTwice(t *testing.T) {
@@ -222,9 +239,9 @@ func TestStartTwice(t *testing.T) {
 	p.Start(context.Background())
 	t.Cleanup(func() { stop(t, p, cancel) })
 	waitPending(t, clk, 1)
-	expectRuns(t, &r, 1)
+	expectRuns(t, p, &r, 1)
 	clk.Advance(time.Minute)
-	expectRuns(t, &r, 2)
+	expectRuns(t, p, &r, 2)
 	if n := clk.Pending(); n != 1 {
 		t.Fatalf("%d timers pending, want 1", n)
 	}

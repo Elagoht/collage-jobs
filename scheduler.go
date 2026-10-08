@@ -25,15 +25,17 @@ func (p *Plugin) start(ctx context.Context) {
 		scheduled := p.scheduled
 		p.mu.Unlock()
 
-		if ctx.Err() != nil {
-			return // the drain began before the server got to serve
-		}
-		for _, j := range scheduled {
-			if p.disabled[j.name] {
-				continue
+		// A drain that began before the server got to serve starts no
+		// scheduled job. Everything after this block still starts, so that
+		// Shutdown can finish what is already queued.
+		if ctx.Err() == nil {
+			for _, j := range scheduled {
+				if p.disabled[j.name] {
+					continue
+				}
+				p.wg.Add(1)
+				go p.loop(p.loopCtx, j)
 			}
-			p.wg.Add(1)
-			go p.loop(p.loopCtx, j)
 		}
 	})
 }
@@ -42,21 +44,17 @@ func (p *Plugin) start(ctx context.Context) {
 // the previous run is still in progress is skipped.
 func (p *Plugin) loop(ctx context.Context, j *Job) {
 	defer p.wg.Done()
+	// This loop's own ctx, ended when the loop returns for any reason: the
+	// clock knows this waiter by it.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if j.runOnStart && ctx.Err() == nil {
 		p.trigger(j)
 	}
 	var last time.Time // the last trigger's time
 	for {
 		now := p.clock.Now()
-		// Count from the last trigger, so that a late wake-up does not shift
-		// an interval; from now if that falls behind.
-		var next time.Time
-		if !last.IsZero() {
-			next = j.sched.next(last.In(p.loc))
-		}
-		if !next.After(now) {
-			next = j.sched.next(now.In(p.loc))
-		}
+		next := nextTrigger(j.sched, p.loc, now, last)
 		if next.IsZero() {
 			p.log.Warn("jobs: the schedule has no next time; the job stops", "job", j.name)
 			return
@@ -64,7 +62,7 @@ func (p *Plugin) loop(ctx context.Context, j *Job) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-p.clock.After(next.Sub(now)):
+		case <-p.clock.After(ctx, next.Sub(now)):
 		}
 		if ctx.Err() != nil {
 			return // the drain began as the trigger fired
@@ -72,6 +70,29 @@ func (p *Plugin) loop(ctx context.Context, j *Job) {
 		last = next
 		p.trigger(j)
 	}
+}
+
+// nextTrigger returns when s triggers next, given the time now and the last
+// trigger (zero before the first), or the zero time if it never does.
+//
+// An interval counts from now as the clock gave it, keeping its monotonic
+// reading, so the wait is real elapsed time: a wall clock set back or forward
+// does not stretch or shrink it. In(loc) would strip that reading.
+//
+// A cron schedule counts from the last trigger, read in loc; from now when that
+// has fallen behind, so a long stall does not replay what it missed.
+func nextTrigger(s schedule, loc *time.Location, now, last time.Time) time.Time {
+	if _, isEvery := s.(every); isEvery {
+		return s.next(now)
+	}
+	var next time.Time
+	if !last.IsZero() {
+		next = s.next(last.In(loc))
+	}
+	if !next.After(now) {
+		next = s.next(now.In(loc))
+	}
+	return next
 }
 
 // trigger starts a run of j, or skips it if one is in progress.

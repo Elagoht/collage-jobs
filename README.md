@@ -8,8 +8,18 @@ begins.
 
 > **Every instance runs its own scheduled jobs.** With N replicas behind a load
 > balancer, a job runs N times per trigger. There is no leader election. If a
-> job must run once across the fleet, run it on one instance only (disable it
-> on the others with `disabled`), or make it safe to run concurrently.
+> job must run once across the fleet, make it safe to run concurrently, or run
+> it on one instance only. Replicas usually share one configuration, so decide
+> that per instance from the environment rather than with `disabled` in
+> `plugins-config.json`:
+>
+> ```go
+> var off []string
+> if os.Getenv("RUN_JOBS") != "1" {
+> 	off = []string{"cleanup"}
+> }
+> j := jobs.NewWith(jobs.Config{Disabled: off})
+> ```
 
 ```sh
 go get github.com/Elagoht/collage-jobs
@@ -84,8 +94,9 @@ a DST change:
 
 A `*/15 * * * *` job follows the wall clock, so its real-time spacing is not
 15 minutes at every DST change. When exact real-time spacing matters, use
-`Every(name, 15*time.Minute, fn)`: an interval does not look at the wall clock
-or the time zone at all.
+`Every(name, 15*time.Minute, fn)`. An interval is measured in elapsed time,
+from the moment the previous trigger fired. Neither DST, the time zone nor a
+wall clock set back or forward changes it.
 
 ## Configuration
 
@@ -101,12 +112,19 @@ defaults that configuration starts from.
 
 collage calls the plugin's `OnServe` from `ListenAndServe`. An application that
 runs its own `http.Server` over `app.Handler()` starts the jobs itself, and
-cancels the ctx when its server starts to drain:
+cancels the ctx when its server starts to drain. The plugin's `Init` must have
+run first, which `app.Handler()` or `app.Start()` does; `Start` panics
+otherwise.
 
 ```go
+if err := app.Start(); err != nil { // runs Init
+	return err
+}
+srv := &http.Server{Addr: ":8080", Handler: app.Handler()}
 ctx, stopJobs := context.WithCancel(context.Background())
 j.Start(ctx)
-// ... on shutdown:
+go srv.ListenAndServe()
+// ... on shutdown, before srv.Shutdown:
 stopJobs()
 ```
 

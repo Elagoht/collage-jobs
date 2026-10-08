@@ -128,10 +128,11 @@ func waitPending(t *testing.T, clk *jobs.FakeClock, n int) {
 	eventually(t, func() bool { return clk.Pending() >= n }, "timers pending")
 }
 
-// eventually fails the test unless cond holds within two seconds.
+// eventually fails the test unless cond holds within ten seconds. It only
+// bounds a wait for goroutines to catch up; no result depends on its timing.
 func eventually(t *testing.T, cond func() bool, what string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -145,17 +146,25 @@ type runs struct{ n atomic.Int32 }
 
 func (r *runs) fn(context.Context) error { r.n.Add(1); return nil }
 
-// expectRuns waits for exactly want runs: it waits until the count reaches want,
-// then checks that no more come for a moment.
-func expectRuns(t *testing.T, r *runs, want int32) {
+// expectRuns checks that r counted exactly want runs once p has no run in
+// progress. Runs start before the Advance that fires them returns, so waiting
+// for none to be in progress leaves no run uncounted, and no sleep is needed.
+func expectRuns(t *testing.T, p *jobs.Plugin, r *runs, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for r.n.Load() < want && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	time.Sleep(20 * time.Millisecond)
+	eventually(t, func() bool { return !jobs.Busy(p) }, "runs in progress to finish")
 	if got := r.n.Load(); got != want {
 		t.Fatalf("%d runs, want %d", got, want)
+	}
+}
+
+// step advances clk by d n times. After each step it waits until the run that
+// step fired has finished, so the next trigger never finds it still in
+// progress, as a real interval would not.
+func step(t *testing.T, p *jobs.Plugin, clk *jobs.FakeClock, d time.Duration, n int) {
+	t.Helper()
+	for range n {
+		clk.Advance(d)
+		eventually(t, func() bool { return !jobs.Busy(p) }, "the run to finish")
 	}
 }
 
@@ -166,9 +175,9 @@ func TestDisabled(t *testing.T) {
 	p.Every("on", time.Minute, on.fn)
 	_, clk := setup(t, p, `{"disabled": ["off"]}`)
 	serve(t, p, clk, 1)
-	clk.Advance(time.Hour)
-	expectRuns(t, &on, 60)
-	expectRuns(t, &off, 0)
+	step(t, p, clk, time.Minute, 60)
+	expectRuns(t, p, &on, 60)
+	expectRuns(t, p, &off, 0)
 }
 
 func TestDisabled_UnknownName(t *testing.T) {
@@ -187,8 +196,8 @@ func TestDisabled_FromNewWith(t *testing.T) {
 	p.Every("on", time.Minute, func(context.Context) error { return nil })
 	_, clk := setup(t, p, "")
 	serve(t, p, clk, 1)
-	clk.Advance(5 * time.Minute)
-	expectRuns(t, &off, 0)
+	step(t, p, clk, time.Minute, 5)
+	expectRuns(t, p, &off, 0)
 }
 
 func TestInit_BadTimezone(t *testing.T) {
@@ -251,6 +260,14 @@ func TestMisuse(t *testing.T) {
 				t.Fatal(err)
 			}
 			j.RunOnStart()
+		}},
+		{"Timeout after Init", "after Init", func() {
+			p := jobs.New()
+			j := p.Every("a", time.Minute, nop)
+			if err := newApp(t, p, "", &logs{}); err != nil {
+				t.Fatal(err)
+			}
+			j.Timeout(time.Second)
 		}},
 		{"Start before Init", "Init", func() { jobs.New().Start(context.Background()) }},
 	}

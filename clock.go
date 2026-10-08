@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"slices"
 	"sync"
 	"time"
@@ -10,42 +11,43 @@ import (
 // it by hand.
 type clock interface {
 	Now() time.Time
-	// After returns a channel that receives once d has passed.
-	After(d time.Duration) <-chan time.Time
+	// After returns a channel that receives once d has passed. ctx is the
+	// waiter's lifetime: the waiter passes the same ctx each time it waits,
+	// and cancels it when it stops waiting for good.
+	After(ctx context.Context, d time.Duration) <-chan time.Time
 }
 
-// realClock is the system clock.
+// realClock is the system clock. It has no use for ctx.
 type realClock struct{}
 
-func (realClock) Now() time.Time                         { return time.Now() }
-func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (realClock) Now() time.Time                                            { return time.Now() }
+func (realClock) After(_ context.Context, d time.Duration) <-chan time.Time { return time.After(d) }
 
-// fakeClock is a clock that moves only when Advance moves it.
+// fakeClock moves only when Advance moves it, and never waits on real time.
 //
-// Its channels are unbuffered, so Advance knows whether somebody took a
-// trigger. When somebody did, Advance waits for them to arm their next timer
-// before it moves on, so that a loop that re-arms after each trigger sees every
-// trigger an Advance passes, in time order.
+// Advance hands each due timer to its waiter over an unbuffered channel, or
+// gives up on it when the waiter's ctx ends. Then it waits until that waiter
+// arms again with the same ctx, or its ctx ends. So a waiter that re-arms after
+// each trigger sees every trigger one Advance passes, in time order.
 type fakeClock struct {
 	mu     sync.Mutex
+	cond   *sync.Cond // broadcast when a waiter arms or a waiter's ctx ends
 	now    time.Time
 	timers []fakeTimer
-	armed  uint64 // After calls so far
+	armed  map[context.Context]uint64 // After calls per waiter ctx
 }
 
 type fakeTimer struct {
-	at time.Time
-	ch chan time.Time
+	at  time.Time
+	ch  chan time.Time
+	ctx context.Context
 }
 
-// The fake clock waits this long, in real time, for a trigger to be taken,
-// and then for the taker to arm its next timer.
-const (
-	fakeDeliver = 500 * time.Millisecond
-	fakeRearm   = 2 * time.Second
-)
-
-func newFakeClock(start time.Time) *fakeClock { return &fakeClock{now: start} }
+func newFakeClock(start time.Time) *fakeClock {
+	c := &fakeClock{now: start, armed: map[context.Context]uint64{}}
+	c.cond = sync.NewCond(&c.mu)
+	return c
+}
 
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
@@ -53,36 +55,50 @@ func (c *fakeClock) Now() time.Time {
 	return c.now
 }
 
-func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+func (c *fakeClock) After(ctx context.Context, d time.Duration) <-chan time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.armed++
+	if _, seen := c.armed[ctx]; !seen {
+		context.AfterFunc(ctx, func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			delete(c.armed, ctx)
+			c.cond.Broadcast()
+		})
+	}
+	c.armed[ctx]++
+	c.cond.Broadcast()
 	if d <= 0 {
 		ch := make(chan time.Time, 1)
 		ch <- c.now
 		return ch
 	}
 	ch := make(chan time.Time)
-	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), ch: ch})
+	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), ch: ch, ctx: ctx})
 	return ch
 }
 
-// Pending returns how many timers are waiting to fire.
+// Pending returns how many timers are waiting to fire, not counting those
+// whose waiter's ctx has ended.
 func (c *fakeClock) Pending() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.timers)
+	n := 0
+	for _, t := range c.timers {
+		if t.ctx.Err() == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Advance moves the clock forward by d, firing each timer that falls due on
-// the way, earliest first, with the clock set to its time. A timer nobody is
-// waiting on any more (its loop has stopped) is dropped.
+// the way, earliest first, with the clock set to its time.
 func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	target := c.now.Add(d)
-	c.mu.Unlock()
 	for {
-		c.mu.Lock()
 		i := -1
 		for k, t := range c.timers {
 			if !t.at.After(target) && (i < 0 || t.at.Before(c.timers[i].at)) {
@@ -91,33 +107,20 @@ func (c *fakeClock) Advance(d time.Duration) {
 		}
 		if i < 0 {
 			c.now = target
-			c.mu.Unlock()
 			return
 		}
 		t := c.timers[i]
 		c.timers = slices.Delete(c.timers, i, i+1)
 		c.now = t.at
-		armed := c.armed
+		before := c.armed[t.ctx]
 		c.mu.Unlock()
-
 		select {
 		case t.ch <- t.at:
-			c.waitArmed(armed)
-		case <-time.After(fakeDeliver):
+		case <-t.ctx.Done():
 		}
-	}
-}
-
-// waitArmed waits until After has been called since armed was read.
-func (c *fakeClock) waitArmed(armed uint64) {
-	deadline := time.Now().Add(fakeRearm)
-	for time.Now().Before(deadline) {
 		c.mu.Lock()
-		done := c.armed > armed
-		c.mu.Unlock()
-		if done {
-			return
+		for c.armed[t.ctx] == before && t.ctx.Err() == nil {
+			c.cond.Wait()
 		}
-		time.Sleep(100 * time.Microsecond)
 	}
 }
