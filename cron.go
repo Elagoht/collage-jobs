@@ -10,7 +10,9 @@ import (
 
 // schedule says when a job triggers next.
 type schedule interface {
-	// next returns the first trigger strictly after t, in t's location.
+	// next returns the first trigger strictly after t, in t's location. It
+	// returns the zero time when nothing matches within five years: February
+	// 30, or "0 0 29 2 *" searched from 2096, since 2100 is not a leap year.
 	next(t time.Time) time.Time
 }
 
@@ -23,9 +25,13 @@ func (e every) next(t time.Time) time.Time { return t.Add(e.d) }
 // bit n is set when value n matches. Day of week uses bits 0-6, 0 = Sunday.
 type cronSpec struct {
 	minute, hour, dom, month, dow uint64
-	// domStar and dowStar are true when the field is exactly "*". They decide
-	// how the two day fields combine; see dayMatches.
+	// domStar and dowStar are true when the field starts with "*" ("*" or
+	// "*/n"), as in Vixie cron. They decide how the two day fields combine;
+	// see dayMatches.
 	domStar, dowStar bool
+	// hourStar is true when the hour field starts with "*". Such a schedule
+	// fires through both copies of a repeated hour; see next.
+	hourStar bool
 }
 
 var (
@@ -75,8 +81,9 @@ func parseCron(expr string) (cronSpec, error) {
 	}
 	return cronSpec{
 		minute: bits[0], hour: bits[1], dom: bits[2], month: bits[3], dow: bits[4],
-		domStar: parts[2] == "*",
-		dowStar: parts[4] == "*",
+		domStar:  strings.HasPrefix(parts[2], "*"),
+		dowStar:  strings.HasPrefix(parts[4], "*"),
+		hourStar: strings.HasPrefix(parts[1], "*"),
 	}, nil
 }
 
@@ -96,6 +103,9 @@ func parseField(field string, f cronField) (uint64, error) {
 		case rng == "*":
 		case strings.Contains(rng, "-"):
 			a, b, _ := strings.Cut(rng, "-")
+			if a == "" || b == "" {
+				return 0, fmt.Errorf("%q is not a value or a range", rng)
+			}
 			var err error
 			if lo, err = parseValue(a, f); err != nil {
 				return 0, err
@@ -120,10 +130,12 @@ func parseField(field string, f cronField) (uint64, error) {
 		if hasStep {
 			n, err := parseNumber(stepStr)
 			if err != nil {
-				return 0, fmt.Errorf("step %q: %w", stepStr, err)
+				return 0, fmt.Errorf("step: %w", err)
 			}
-			if n == 0 {
-				return 0, errors.New("step must be at least 1")
+			// A step larger than the field's span is allowed, as in Vixie
+			// cron ("4-7/10" is just 4); only zero and absurd sizes fail.
+			if n < 1 || n > maxStep {
+				return 0, fmt.Errorf("step %s is out of range 1-%d", stepStr, maxStep)
 			}
 			step = n
 		}
@@ -141,27 +153,38 @@ func parseValue(s string, f cronField) (int, error) {
 		return 0, err
 	}
 	if v < f.min || v > f.max {
-		return 0, fmt.Errorf("%d is out of range %d-%d", v, f.min, f.max)
+		return 0, fmt.Errorf("%s is out of range %d-%d", s, f.min, f.max)
 	}
 	return v, nil
 }
 
-// parseNumber accepts plain decimal digits only: no sign, no names.
+// maxStep is the largest step accepted.
+const maxStep = 9999
+
+// tooBig stands in for any number with more digits than a field can use, so
+// that it is reported as out of range rather than as an overflow.
+const tooBig = 1 << 20
+
+// parseNumber accepts plain decimal digits only: no sign, no names. Leading
+// zeros are allowed ("05" is 5).
 func parseNumber(s string) (int, error) {
-	if s == "" || len(s) > 4 {
-		return 0, fmt.Errorf("%q is not a number", s)
+	if s == "" {
+		return 0, errors.New("missing number")
 	}
 	for _, r := range s {
 		if r < '0' || r > '9' {
 			return 0, fmt.Errorf("%q is not a number", s)
 		}
 	}
+	if digits := strings.TrimLeft(s, "0"); len(digits) > 4 {
+		return tooBig, nil
+	}
 	return strconv.Atoi(s)
 }
 
 // dayMatches applies the Vixie cron rule. When both day of month and day of
-// week are restricted, a day matches if either one does. When either is "*",
-// both must match, which leaves the other one deciding.
+// week are restricted, a day matches if either one does. When either starts
+// with "*" ("*" or "*/n"), both must match.
 func (c cronSpec) dayMatches(wall time.Time) bool {
 	dom := c.dom&(1<<uint(wall.Day())) != 0
 	dow := c.dow&(1<<uint(wall.Weekday())) != 0
@@ -171,8 +194,17 @@ func (c cronSpec) dayMatches(wall time.Time) bool {
 	return dom || dow
 }
 
+// matchesWall reports whether a wall-clock time (held in UTC) matches all
+// five fields.
+func (c cronSpec) matchesWall(wall time.Time) bool {
+	return c.month&(1<<uint(wall.Month())) != 0 &&
+		c.dayMatches(wall) &&
+		c.hour&(1<<uint(wall.Hour())) != 0 &&
+		c.minute&(1<<uint(wall.Minute())) != 0
+}
+
 // next returns the first trigger strictly after t, in t's location, or the
-// zero time if none comes within five years (such as February 30).
+// zero time if none comes within five years.
 //
 // The search walks wall-clock fields (month, day, hour, minute) on a plain
 // calendar kept in UTC, which has no DST, and only then resolves a matching
@@ -185,17 +217,24 @@ func (c cronSpec) dayMatches(wall time.Time) bool {
 //     the trigger moves to the transition itself, the first instant after the
 //     gap (03:00). Every skipped wall time on that day lands on that same
 //     instant, so a job runs there once.
-//   - Overlap: a wall time repeated by fall-back occurs twice. time.Date picks
-//     the first occurrence (daylight time). Because the walk is in wall-clock
-//     time, each wall time is produced once, so the second occurrence is never
-//     a candidate. When t itself is inside the repeated hour, candidates whose
-//     first occurrence is not after t are skipped as already run.
+//   - Overlap: a wall time repeated by fall-back occurs twice, and time.Date
+//     does not promise which one it returns (in practice the earlier one west
+//     of UTC and the later one in Europe/London). resolve always moves to the
+//     first occurrence. The walk produces each wall time once, so the second
+//     occurrence is never a candidate from it; when t is inside the repeated
+//     hour, candidates whose first occurrence is not after t are skipped as
+//     already run. That is the whole story for a fixed hour ("30 1 * * *"
+//     runs once).
+//   - Overlap with a "*" hour ("*/15 * * * *", "0 * * * *"): such a schedule
+//     fires on every real occurrence, as Vixie cron does, or a 15-minute job
+//     would leave a 75-minute hole. repeatNext finds the earliest match among
+//     the second occurrences, and the earlier of the two results wins.
 func (c cronSpec) next(t time.Time) time.Time {
 	loc := t.Location()
-	lt := t.In(loc)
-	wall := time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), lt.Minute()+1, 0, 0, time.UTC)
+	wall := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute()+1, 0, 0, time.UTC)
 	limit := wall.AddDate(5, 0, 0)
 
+	found := time.Time{}
 	for wall.Before(limit) {
 		if c.month&(1<<uint(wall.Month())) == 0 {
 			wall = time.Date(wall.Year(), wall.Month()+1, 1, 0, 0, 0, 0, time.UTC)
@@ -214,22 +253,77 @@ func (c cronSpec) next(t time.Time) time.Time {
 			continue
 		}
 		if at := resolve(wall, loc); at.After(t) {
-			return at
+			found = at
+			break
 		}
 		// The wall time's instant is not after t: the first occurrence of a
 		// repeated time, or a gap that maps back to the transition t is at
 		// or past. It already ran; keep walking.
 		wall = wall.Add(time.Minute)
 	}
+	if c.hourStar {
+		if rep := c.repeatNext(t, found, limit); !rep.IsZero() && (found.IsZero() || rep.Before(found)) {
+			return rep
+		}
+	}
+	return found
+}
+
+// repeatNext returns the earliest second occurrence of a matching wall time
+// that is after t and before until (or, with until zero, before the wall-clock
+// limit), or the zero time. Second occurrences only exist in the window just
+// after a fall-back transition, [transition, transition+shift), so it visits
+// the transitions from the one that began t's zone period onward and scans
+// each window a minute at a time; a window is at most a few hours.
+func (c cronSpec) repeatNext(t, until, limit time.Time) time.Time {
+	loc := t.Location()
+	tr, _ := t.ZoneBounds()
+	for !tr.IsZero() {
+		if !until.IsZero() && !tr.Before(until) {
+			return time.Time{}
+		}
+		if wallOf(tr, loc).After(limit) {
+			return time.Time{}
+		}
+		_, after := tr.Zone()
+		_, before := tr.Add(-time.Second).Zone()
+		if shift := time.Duration(before-after) * time.Second; shift > 0 {
+			for u := tr; u.Before(tr.Add(shift)); u = u.Add(time.Minute) {
+				if u.After(t) && c.matchesWall(wallOf(u, loc)) {
+					return u.In(loc)
+				}
+			}
+		}
+		_, tr = tr.ZoneBounds()
+	}
 	return time.Time{}
 }
 
+// wallOf returns u's wall clock in loc, to the minute, held in UTC.
+func wallOf(u time.Time, loc *time.Location) time.Time {
+	w := u.In(loc)
+	return time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, time.UTC)
+}
+
 // resolve turns a wall-clock time (held in UTC) into an instant in loc. A
-// wall time inside a DST gap resolves to the first instant after the gap.
+// wall time inside a DST gap resolves to the first instant after the gap; a
+// wall time inside a fall-back overlap resolves to its first occurrence.
 func resolve(wall time.Time, loc *time.Location) time.Time {
 	at := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), 0, 0, loc)
 	got := time.Date(at.Year(), at.Month(), at.Day(), at.Hour(), at.Minute(), 0, 0, time.UTC)
 	if got.Equal(wall) {
+		// In an overlap time.Date may return either occurrence. If the zone
+		// period before at's had a larger offset, the same wall time may also
+		// exist earlier, in that period: step back to it if so.
+		if start, _ := at.ZoneBounds(); !start.IsZero() {
+			_, off := at.Zone()
+			_, prevOff := start.Add(-time.Second).Zone()
+			if prevOff > off {
+				if earlier := at.Add(-time.Duration(prevOff-off) * time.Second); earlier.Before(start) {
+					return earlier
+				}
+			}
+		}
 		return at
 	}
 	// The wall time does not exist. at sits in the zone period on one side
