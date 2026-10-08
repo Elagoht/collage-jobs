@@ -26,6 +26,8 @@ drain begins.
 go get github.com/Elagoht/collage-jobs
 ```
 
+Requires collage v0.55.0 or later, for `ServeHook`.
+
 ```json
 {
   "elagoht/jobs": {
@@ -155,13 +157,56 @@ nil function, a negative option, or a queue defined after `Init`.
 From Go, `jobs.NewWith(jobs.Config{Timezone: "Europe/Istanbul"})` sets the
 defaults that configuration starts from.
 
-## Starting without ListenAndServe
+## Lifecycle
 
-collage calls the plugin's `OnServe` from `ListenAndServe`. An application that
-runs its own `http.Server` over `app.Handler()` starts the jobs itself, and
-cancels the ctx when its server starts to drain. The plugin's `Init` must have
-run first, which `app.Handler()` or `app.Start()` does; `Start` panics
-otherwise.
+With `app.ListenAndServe()`, the plugin needs nothing more:
+
+1. **Serving.** Once the port is bound, collage calls the plugin's `OnServe`.
+   The scheduled jobs start (and `RunOnStart` jobs run), and the queues'
+   workers start on whatever was enqueued before.
+2. **The drain.** On `SIGINT`, `SIGTERM` or `app.Shutdown(ctx)`, the drain
+   begins, and the ctx `OnServe` got ends. From then on no job is triggered,
+   and `Enqueue` returns `ErrDraining`. Runs in progress go on, and the workers
+   keep handling what is queued, while the server keeps serving for
+   `Server.DrainDelay`.
+3. **Shutdown.** After the server has stopped, collage calls the plugin's
+   `Shutdown(ctx)`, with `Server.ShutdownTimeout` on a signal, or your ctx when
+   you call `app.Shutdown(ctx)`:
+   - It waits for runs in progress, and the workers keep taking queued items
+     until every queue is empty. Then it returns, without waiting for ctx to
+     end.
+   - If ctx ends first, the runs' ctx is cancelled, and `Shutdown` waits one
+     more second for them to return. A job that ignores its ctx is left
+     running: `Shutdown` logs at Warn that it gave up, and returns. Its
+     goroutine lives on until the function returns, but the plugin keeps none
+     of its own waiting for it.
+   - Each queue with items left logs at Warn `jobs: dropped queued items`,
+     with the queue's name and the count. An item waiting for a retry when
+     the runs' ctx ends counts as dropped too; it is not a failure, so
+     `OnFailure` is not called.
+
+So a stop can take `DrainDelay` plus the time the queues need; give
+`ShutdownTimeout`, or your ctx, enough for both. See collage's
+[deployment guide](https://github.com/Elagoht/collage/blob/main/docs/deployment.md)
+for the stop sequence.
+
+**Queued work is in memory.** Items still queued when the process ends, or
+when `Shutdown`'s ctx ends, are lost. The dropped count is logged so that
+the loss is visible, but the items are not saved anywhere. Work that must
+survive a restart belongs in your database, with a job that picks it up.
+
+`Shutdown` closes the plugin for good: after it, `Enqueue` returns
+`ErrDraining`, even if no drain came first, and `Start` or `OnServe` starts
+nothing. A `Shutdown` before the plugin started returns at once.
+
+### Serving with your own server
+
+collage calls `OnServe` only from `ListenAndServe`. An application that runs
+its own `http.Server` over `app.Handler()` starts the plugin with `Start(ctx)`,
+cancels that ctx when its server starts to drain, and calls `app.Shutdown` after
+the server has stopped, so that the plugin's `Shutdown` finishes the queues.
+The plugin's `Init` must have run first, which `app.Handler()` or `app.Start()`
+does; `Start` panics otherwise.
 
 ```go
 if err := app.Start(); err != nil { // runs Init
@@ -171,8 +216,22 @@ srv := &http.Server{Addr: ":8080", Handler: app.Handler()}
 ctx, stopJobs := context.WithCancel(context.Background())
 j.Start(ctx)
 go srv.ListenAndServe()
-// ... on shutdown, before srv.Shutdown:
-stopJobs()
+
+// On shutdown:
+stopJobs()                // the drain: no more triggers, Enqueue refused
+srv.Shutdown(shutdownCtx) // requests in flight finish
+app.Shutdown(shutdownCtx) // the plugin finishes its queues
 ```
 
 Only the first of `OnServe` and `Start` does anything.
+
+## Out of scope
+
+- A persistent queue. `Store[T]` is an interface, but the in-memory store is
+  the only implementation.
+- Leader election or locks across instances: every instance runs its own
+  scheduled jobs.
+- Triggering a job by hand, from the CLI or over HTTP.
+- Metrics. Runs and failures are logged.
+- Priorities.
+- Delayed enqueue (`EnqueueAt`).

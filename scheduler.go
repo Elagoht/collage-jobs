@@ -7,47 +7,45 @@ import (
 	"time"
 )
 
-// start runs once, for the first of OnServe and Start. It keeps ctx as the
-// serve ctx, makes the ctx every run derives from, and starts one loop per
-// enabled scheduled job, unless ctx is already done, and every queue's workers
-// in any case.
+// start runs for the first of OnServe and Start, unless Shutdown came first.
+// It keeps ctx as the serve ctx, makes the ctx every run derives from, and
+// starts one loop per enabled scheduled job, unless ctx is already done, and
+// every queue's workers in any case. It does all of that under p.mu, so a
+// Shutdown sees the plugin either not started or started in full.
 func (p *Plugin) start(ctx context.Context) {
 	p.mu.Lock()
-	inited := p.inited
-	p.mu.Unlock()
-	if !inited {
+	defer p.mu.Unlock()
+	if !p.inited {
 		panic("elagoht/jobs: Start before Init: start the application (app.Start or app.Handler) first")
 	}
-	p.startOnce.Do(func() {
-		p.mu.Lock()
-		p.running = ctx
-		p.loopCtx, p.stopLoops = context.WithCancel(ctx)
-		p.workCtx, p.cancelWork = context.WithCancel(context.Background())
-		scheduled, queues := p.scheduled, p.queues
-		p.mu.Unlock()
+	if p.running != nil || p.closed.Load() {
+		return
+	}
+	p.running = ctx
+	p.loopCtx, p.stopLoops = context.WithCancel(ctx)
+	p.workCtx, p.cancelWork = context.WithCancel(context.Background())
 
-		// A drain that began before the server got to serve starts no
-		// scheduled job. Everything after this block still starts, so that
-		// Shutdown can finish what is already queued.
-		if ctx.Err() == nil {
-			for _, j := range scheduled {
-				if p.disabled[j.name] {
-					continue
-				}
-				p.wg.Add(1)
-				go p.loop(p.loopCtx, j)
+	// A drain that began before the server got to serve starts no scheduled
+	// job. The workers still start, so that Shutdown can finish what is
+	// already queued.
+	if ctx.Err() == nil {
+		for _, j := range p.scheduled {
+			if p.disabled[j.name] {
+				continue
 			}
+			p.active.Add(1)
+			go p.loop(p.loopCtx, j)
 		}
-		for _, q := range queues {
-			q.startWorkers()
-		}
-	})
+	}
+	for _, q := range p.queues {
+		q.startWorkers(p.workCtx)
+	}
 }
 
 // loop triggers j on its schedule until ctx ends. A trigger that comes while
 // the previous run is still in progress is skipped.
 func (p *Plugin) loop(ctx context.Context, j *Job) {
-	defer p.wg.Done()
+	defer p.active.Done()
 	// This loop's own ctx, ended when the loop returns for any reason: the
 	// clock knows this waiter by it.
 	ctx, cancel := context.WithCancel(ctx)
@@ -105,9 +103,9 @@ func (p *Plugin) trigger(j *Job) {
 		p.log.Debug("jobs: skipped, the previous run is still in progress", "job", j.name)
 		return
 	}
-	p.wg.Add(1)
+	p.active.Add(1)
 	go func() {
-		defer p.wg.Done()
+		defer p.active.Done()
 		defer j.busy.Store(false)
 		p.run(j)
 	}()

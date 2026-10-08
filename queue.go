@@ -39,10 +39,27 @@ type Queue[T any] struct {
 	// unfinished counts items handed to the queue and not yet handled:
 	// waiting, running or waiting for a retry.
 	unfinished atomic.Int64
+	// popCtx is what the workers take items under. It ends once Shutdown has
+	// begun and the store is empty, or when the runs' ctx ends.
+	popCtx  context.Context
+	stopPop context.CancelFunc
+	// cutShort counts items dropped while waiting for a retry, because the
+	// runs' ctx ended.
+	cutShort atomic.Int64
 }
 
-// worker is a queue, seen by the plugin that starts its workers.
-type worker interface{ startWorkers() }
+// worker is a queue, seen by the plugin that starts and stops its workers.
+type worker interface {
+	// startWorkers starts the workers, under workCtx. p.mu is held.
+	startWorkers(workCtx context.Context)
+	// finish tells the workers that Shutdown has begun: they stop once the
+	// store is empty.
+	finish()
+	// dropped returns how many items were never handled: those left in the
+	// store and those cut short in a retry's wait.
+	dropped() int64
+	queueName() string
+}
 
 // NewQueue defines a queue on p whose items fn handles. Items can be enqueued
 // at once; they are handled once p starts. It panics if name is empty or
@@ -76,10 +93,15 @@ func NewQueue[T any](p *Plugin, name string, fn func(context.Context, T) error, 
 }
 
 // Enqueue adds item to the queue without blocking. It returns ErrDraining once
-// the drain has begun and ErrQueueFull when the queue is full. Before the
-// plugin starts, items wait in the queue.
+// the drain or Shutdown has begun and ErrQueueFull when the queue is full.
+// Before the plugin starts, items wait in the queue.
 func (q *Queue[T]) Enqueue(_ context.Context, item T) error {
-	if q.p.draining() {
+	// The check and the push under one hold of p.mu, which Shutdown takes to
+	// close the plugin: an item is refused, or in the store before Shutdown
+	// counts what it drops.
+	q.p.mu.Lock()
+	defer q.p.mu.Unlock()
+	if q.p.drainingLocked() {
 		return ErrDraining
 	}
 	q.unfinished.Add(1)
@@ -90,28 +112,44 @@ func (q *Queue[T]) Enqueue(_ context.Context, item T) error {
 	return nil
 }
 
-// startWorkers starts the queue's workers, counted by the plugin's wg.
-func (q *Queue[T]) startWorkers() {
+func (q *Queue[T]) startWorkers(workCtx context.Context) {
+	q.popCtx, q.stopPop = context.WithCancel(workCtx)
 	for range q.opts.Workers {
-		q.p.wg.Add(1)
+		q.p.active.Add(1)
 		go q.work()
+	}
+}
+
+func (q *Queue[T]) finish() { q.stopIfEmpty() }
+
+func (q *Queue[T]) dropped() int64 { return int64(q.store.Len()) + q.cutShort.Load() }
+
+func (q *Queue[T]) queueName() string { return q.name }
+
+// stopIfEmpty ends popCtx if Shutdown has begun and the store is empty. A
+// worker checks after each item and Shutdown once as it begins; closed is set
+// before Shutdown's check, so whichever comes last sees both.
+func (q *Queue[T]) stopIfEmpty() {
+	if q.p.closed.Load() && q.store.Len() == 0 {
+		q.stopPop()
 	}
 }
 
 // work handles items until the store's Pop ends.
 func (q *Queue[T]) work() {
-	defer q.p.wg.Done()
+	defer q.p.active.Done()
 	// This worker's own ctx: its backoff waits derive from it, and it ends
 	// when the worker returns.
 	ctx, cancel := context.WithCancel(q.p.workCtx)
 	defer cancel()
 	for {
-		item, err := q.store.Pop(q.p.workCtx) // Task 5 swaps in the ctx Shutdown ends once the queue is empty
+		item, err := q.store.Pop(q.popCtx)
 		if err != nil {
 			return
 		}
 		q.handle(ctx, item)
 		q.unfinished.Add(-1)
+		q.stopIfEmpty()
 	}
 }
 
@@ -128,12 +166,18 @@ func (q *Queue[T]) handle(ctx context.Context, item T) {
 			return
 		}
 		if attempt < q.opts.MaxAttempts {
-			wait := backoff(attempt)
-			log.Warn("jobs: failed, will retry", "queue", q.name, "attempt", attempt, "retry_in", wait, "duration", took, "error", err)
-			if q.wait(ctx, wait) {
-				continue
+			if ctx.Err() == nil {
+				wait := backoff(attempt)
+				log.Warn("jobs: failed, will retry", "queue", q.name, "attempt", attempt, "retry_in", wait, "duration", took, "error", err)
+				if q.wait(ctx, wait) {
+					continue
+				}
 			}
-			// The jobs' ctx ended during the wait: this attempt was the last.
+			// Shutdown ended the runs' ctx before the retry. The item is
+			// dropped, as a queued one is, not failed: Shutdown counts it, and
+			// OnFailure is not called.
+			q.cutShort.Add(1)
+			return
 		}
 		log.Error("jobs: failed", "queue", q.name, "attempts", attempt, "duration", took, "error", err)
 		q.failed(item, err)

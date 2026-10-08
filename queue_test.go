@@ -15,9 +15,8 @@ import (
 )
 
 // serveQueues starts p with Start. At the end of the test it cancels the serve
-// ctx and shuts p down with a short ctx: workers wait for items until the jobs'
-// ctx ends, so Shutdown always waits for its ctx while a queue exists. No
-// assertion depends on that wait.
+// ctx and shuts p down with a short ctx, which drops whatever a test left
+// waiting for a retry. No assertion depends on that wait.
 func serveQueues(t *testing.T, p *jobs.Plugin) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

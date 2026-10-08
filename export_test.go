@@ -16,10 +16,8 @@ func UseFakeClock(p *Plugin, start time.Time) *FakeClock {
 // WaitIdle waits up to d for every scheduler loop and run of p to end, and
 // reports whether they did.
 func WaitIdle(p *Plugin, d time.Duration) bool {
-	done := make(chan struct{})
-	go func() { p.wg.Wait(); close(done) }()
 	select {
-	case <-done:
+	case <-p.active.Idle():
 		return true
 	case <-time.After(d):
 		return false
@@ -65,3 +63,6 @@ func (c *fakeClock) NextDue() time.Time {
 	}
 	return due
 }
+
+// NewMemStore returns the in-memory store, holding up to capacity items.
+func NewMemStore[T any](capacity int) Store[T] { return newMemStore[T](capacity) }

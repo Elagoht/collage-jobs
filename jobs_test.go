@@ -226,34 +226,34 @@ func TestMisuse(t *testing.T) {
 	cases := []struct {
 		name string
 		want string // in the panic message
-		do   func()
+		do   func(t *testing.T)
 	}{
-		{"duplicate name", `"a"`, func() {
+		{"duplicate name", `"a"`, func(*testing.T) {
 			p := jobs.New()
 			p.Every("a", time.Minute, nop)
 			p.Cron("a", "* * * * *", nop)
 		}},
-		{"empty name", "name", func() { jobs.New().Every("", time.Minute, nop) }},
-		{"nil Every fn", "nil", func() { jobs.New().Every("a", time.Minute, nil) }},
-		{"nil Cron fn", "nil", func() { jobs.New().Cron("a", "* * * * *", nil) }},
-		{"zero interval", "interval", func() { jobs.New().Every("a", 0, nop) }},
-		{"negative timeout", "timeout", func() { jobs.New().Every("a", time.Minute, nop).Timeout(-time.Second) }},
-		{"bad cron", "day of month", func() { jobs.New().Cron("a", "0 3 32 * *", nop) }},
-		{"Every after Init", "after Init", func() {
+		{"empty name", "name", func(*testing.T) { jobs.New().Every("", time.Minute, nop) }},
+		{"nil Every fn", "nil", func(*testing.T) { jobs.New().Every("a", time.Minute, nil) }},
+		{"nil Cron fn", "nil", func(*testing.T) { jobs.New().Cron("a", "* * * * *", nil) }},
+		{"zero interval", "interval", func(*testing.T) { jobs.New().Every("a", 0, nop) }},
+		{"negative timeout", "timeout", func(*testing.T) { jobs.New().Every("a", time.Minute, nop).Timeout(-time.Second) }},
+		{"bad cron", "day of month", func(*testing.T) { jobs.New().Cron("a", "0 3 32 * *", nop) }},
+		{"Every after Init", "after Init", func(t *testing.T) {
 			p := jobs.New()
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
 			}
 			p.Every("a", time.Minute, nop)
 		}},
-		{"Cron after Init", "after Init", func() {
+		{"Cron after Init", "after Init", func(t *testing.T) {
 			p := jobs.New()
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
 			}
 			p.Cron("a", "* * * * *", nop)
 		}},
-		{"RunOnStart after Init", "after Init", func() {
+		{"RunOnStart after Init", "after Init", func(t *testing.T) {
 			p := jobs.New()
 			j := p.Every("a", time.Minute, nop)
 			if err := newApp(t, p, "", &logs{}); err != nil {
@@ -261,7 +261,7 @@ func TestMisuse(t *testing.T) {
 			}
 			j.RunOnStart()
 		}},
-		{"Timeout after Init", "after Init", func() {
+		{"Timeout after Init", "after Init", func(t *testing.T) {
 			p := jobs.New()
 			j := p.Every("a", time.Minute, nop)
 			if err := newApp(t, p, "", &logs{}); err != nil {
@@ -269,7 +269,7 @@ func TestMisuse(t *testing.T) {
 			}
 			j.Timeout(time.Second)
 		}},
-		{"Start before Init", "Init", func() { jobs.New().Start(context.Background()) }},
+		{"Start before Init", "Init", func(*testing.T) { jobs.New().Start(context.Background()) }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -289,7 +289,7 @@ func TestMisuse(t *testing.T) {
 					t.Fatalf("panic %q, want one prefixed elagoht/jobs: and naming %q", msg, c.want)
 				}
 			}()
-			c.do()
+			c.do(t)
 		})
 	}
 }

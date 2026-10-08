@@ -9,7 +9,8 @@ type Store[T any] interface {
 	// never blocks.
 	Push(item T) error
 	// Pop removes and returns the oldest item, blocking until there is one
-	// or ctx ends, when it returns ctx's error.
+	// or ctx ends, when it returns ctx's error. With ctx already done it takes
+	// nothing, even when an item waits.
 	Pop(ctx context.Context) (T, error)
 	// Len returns how many items wait.
 	Len() int
@@ -32,6 +33,12 @@ func (s *memStore[T]) Push(item T) error {
 }
 
 func (s *memStore[T]) Pop(ctx context.Context) (T, error) {
+	// Checked first: with an item waiting too, select would pick at random,
+	// and a cancelled worker must take nothing more.
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
 	select {
 	case item := <-s.ch:
 		return item, nil
