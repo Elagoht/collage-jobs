@@ -191,11 +191,17 @@ func TestNothingBeforeServe(t *testing.T) {
 	var r runs
 	p.Every("tick", time.Minute, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
-	clk.Advance(time.Hour)
-	expectRuns(t, p, &r, 0)
+	// Something started by mistake in Init would run on a goroutine that may
+	// not have been scheduled yet, so give it time to show itself. Waiting on
+	// real time is fine in a check that something does NOT happen: a slow
+	// machine can only make it miss a bug, never fail a correct plugin.
+	time.Sleep(50 * time.Millisecond)
 	if n := clk.Pending(); n != 0 {
 		t.Fatalf("%d timers pending before serving, want 0", n)
 	}
+	expectRuns(t, p, &r, 0) // RunOnStart did not run either
+	clk.Advance(time.Minute)
+	expectRuns(t, p, &r, 0)
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}

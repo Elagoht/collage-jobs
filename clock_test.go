@@ -110,4 +110,11 @@ func TestNextTrigger_Cron(t *testing.T) {
 	if got := nextTrigger(spec, loc, now, last); !got.Equal(want) {
 		t.Fatalf("late: %v, want %v", got, want)
 	}
+	// The wall clock set back after a trigger: now is before last. Counting
+	// from last keeps the trigger that already ran from running again.
+	setBack := last.Add(-10 * time.Minute)
+	want = time.Date(2026, 10, 10, 3, 0, 0, 0, loc)
+	if got := nextTrigger(spec, loc, setBack, last); !got.Equal(want) {
+		t.Fatalf("clock set back: %v, want %v (the run at %v must not repeat)", got, want, last)
+	}
 }
