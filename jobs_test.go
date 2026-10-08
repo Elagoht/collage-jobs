@@ -209,6 +209,19 @@ func TestInit_BadTimezone(t *testing.T) {
 	if !strings.Contains(err.Error(), "Mars/Olympus_Mons") {
 		t.Fatalf("Init error %v does not name the zone", err)
 	}
+	// A minimal image without zoneinfo fails the same way as a typo, so the
+	// error names the other cause and its fix.
+	if !strings.Contains(err.Error(), `import _ "time/tzdata"`) {
+		t.Fatalf("Init error %v does not point at time/tzdata", err)
+	}
+}
+
+func TestInit_BadConfig(t *testing.T) {
+	p := jobs.New()
+	err := newApp(t, p, `{"timezone": 3}`, &logs{})
+	if err == nil || !strings.Contains(err.Error(), "elagoht/jobs: config") {
+		t.Fatalf("Init error %v, want an elagoht/jobs config error", err)
+	}
 }
 
 func TestInit_Twice(t *testing.T) {
@@ -239,6 +252,11 @@ func TestMisuse(t *testing.T) {
 		{"zero interval", "interval", func(*testing.T) { jobs.New().Every("a", 0, nop) }},
 		{"negative timeout", "timeout", func(*testing.T) { jobs.New().Every("a", time.Minute, nop).Timeout(-time.Second) }},
 		{"bad cron", "day of month", func(*testing.T) { jobs.New().Cron("a", "0 3 32 * *", nop) }},
+		{"February 30", "never matches", func(*testing.T) { jobs.New().Cron("a", "0 0 30 2 *", nop) }},
+		{"31st of a short month", "never matches", func(*testing.T) { jobs.New().Cron("a", "0 0 31 4,6,9,11 *", nop) }},
+		// A day of week starting with "*" makes the two day fields combine
+		// with AND, so February 30 still never comes.
+		{"February 30 on a starred weekday", "never matches", func(*testing.T) { jobs.New().Cron("a", "0 0 30 2 */2", nop) }},
 		{"Every after Init", "after Init", func(t *testing.T) {
 			p := jobs.New()
 			if err := newApp(t, p, "", &logs{}); err != nil {
@@ -294,8 +312,32 @@ func TestMisuse(t *testing.T) {
 	}
 }
 
+// Expressions that match only rarely, or only through the day of week, are
+// accepted: only one that can never match panics.
+func TestCron_RareButPossible(t *testing.T) {
+	nop := func(context.Context) error { return nil }
+	for _, expr := range []string{
+		"0 0 29 2 *",   // leap years
+		"0 0 30 2 1",   // both day fields restricted: any Monday in February
+		"0 0 29 2 1",   // the same, and February 29 as well
+		"0 0 */30 2 *", // the 1st
+		"0 0 29 2 */7", // February 29 on a Sunday: 2032, then 2060
+		"0 0 31 1-12 *",
+		"0 0 30,31 2,4 *",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Cron(%q) panicked: %v", expr, r)
+				}
+			}()
+			jobs.New().Cron("a", expr, nop)
+		})
+	}
+}
+
 func TestErrDraining(t *testing.T) {
-	if !errors.Is(jobs.ErrDraining, jobs.ErrDraining) || jobs.ErrDraining.Error() != "jobs: draining" {
+	if !errors.Is(jobs.ErrDraining, jobs.ErrDraining) || jobs.ErrDraining.Error() != "elagoht/jobs: draining" {
 		t.Fatalf("ErrDraining = %v", jobs.ErrDraining)
 	}
 }

@@ -10,7 +10,7 @@ import (
 )
 
 // ErrQueueFull is returned by Enqueue when the queue holds Capacity items.
-var ErrQueueFull = errors.New("jobs: queue full")
+var ErrQueueFull = errors.New("elagoht/jobs: queue full")
 
 // QueueOptions configures a queue. The zero value of each field means its
 // default.
@@ -35,7 +35,7 @@ type Queue[T any] struct {
 	name  string
 	fn    func(context.Context, T) error
 	opts  QueueOptions[T]
-	store Store[T]
+	store store[T]
 	// unfinished counts items handed to the queue and not yet handled:
 	// waiting, running or waiting for a retry.
 	unfinished atomic.Int64
@@ -94,15 +94,17 @@ func NewQueue[T any](p *Plugin, name string, fn func(context.Context, T) error, 
 }
 
 // Enqueue adds item to the queue without blocking. It returns ErrDraining once
-// the drain or Shutdown has begun and ErrQueueFull when the queue is full.
-// Before the plugin starts, items wait in the queue.
+// the plugin's Shutdown has begun, and ErrQueueFull when the queue is full.
+// Before the plugin starts, items wait in the queue. During the drain items
+// are still accepted, since the server still serves; Shutdown finishes them,
+// or logs them as dropped.
 func (q *Queue[T]) Enqueue(_ context.Context, item T) error {
 	// The check and the push under one hold of p.mu, which Shutdown takes to
 	// close the plugin: an item is refused, or in the store before Shutdown
 	// counts what it drops.
 	q.p.mu.Lock()
 	defer q.p.mu.Unlock()
-	if q.p.drainingLocked() {
+	if q.p.closed.Load() {
 		return ErrDraining
 	}
 	q.unfinished.Add(1)
@@ -171,13 +173,13 @@ func (q *Queue[T]) handle(ctx context.Context, item T) {
 		err := callItem(q.p.workCtx, q.fn, item)
 		took := time.Since(began)
 		if err == nil {
-			log.Debug("jobs: ran", "queue", q.name, "attempt", attempt, "duration", took)
+			log.Debug("elagoht/jobs: ran", "queue", q.name, "attempt", attempt, "duration", took)
 			return
 		}
 		if attempt < q.opts.MaxAttempts {
 			if ctx.Err() == nil {
 				wait := backoff(attempt)
-				log.Warn("jobs: failed, will retry", "queue", q.name, "attempt", attempt, "retry_in", wait, "duration", took, "error", err)
+				log.Warn("elagoht/jobs: failed, will retry", "queue", q.name, "attempt", attempt, "retry_in", wait, "duration", took, "error", err)
 				if q.wait(ctx, wait) {
 					continue
 				}
@@ -187,11 +189,11 @@ func (q *Queue[T]) handle(ctx context.Context, item T) {
 			// OnFailure is not called. With no attempt left, as always with
 			// MaxAttempts 1, a failure is final even when the cancel caused
 			// it: it is logged at Error and handed to OnFailure, below.
-			log.Debug("jobs: dropped at shutdown, not retried", "queue", q.name, "attempt", attempt, "duration", took, "error", err)
+			log.Debug("elagoht/jobs: dropped at shutdown, not retried", "queue", q.name, "attempt", attempt, "duration", took, "error", err)
 			q.cutShort.Add(1)
 			return
 		}
-		log.Error("jobs: failed", "queue", q.name, "attempts", attempt, "duration", took, "error", err)
+		log.Error("elagoht/jobs: failed", "queue", q.name, "attempts", attempt, "duration", took, "error", err)
 		q.failed(item, err)
 		return
 	}
@@ -220,7 +222,7 @@ func (q *Queue[T]) failed(item T, err error) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			q.p.log.Error("jobs: OnFailure panicked", "queue", q.name, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			q.p.log.Error("elagoht/jobs: OnFailure panicked", "queue", q.name, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 		}
 	}()
 	q.opts.OnFailure(q.p.workCtx, item, err)

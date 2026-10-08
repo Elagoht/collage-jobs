@@ -110,10 +110,10 @@ func TestQueue_RunsItems(t *testing.T) {
 			t.Fatalf("item %d handled %d times, want 1 (all: %v)", i, seen[i], seen)
 		}
 	}
-	if n := l.count(slog.LevelDebug, "jobs: ran", "work"); n != 10 {
+	if n := l.count(slog.LevelDebug, "elagoht/jobs: ran", "work"); n != 10 {
 		t.Fatalf("%d runs logged, want 10", n)
 	}
-	if n := l.count(slog.LevelError, "jobs: failed", "work"); n != 0 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "work"); n != 0 {
 		t.Fatalf("%d failures logged, want 0", n)
 	}
 }
@@ -133,7 +133,7 @@ func TestQueue_Full(t *testing.T) {
 	if n := jobs.QueueLen(q); n != 2 {
 		t.Fatalf("%d queued, want 2", n)
 	}
-	if jobs.ErrQueueFull.Error() != "jobs: queue full" {
+	if jobs.ErrQueueFull.Error() != "elagoht/jobs: queue full" {
 		t.Fatalf("ErrQueueFull = %v", jobs.ErrQueueFull)
 	}
 }
@@ -152,9 +152,10 @@ func TestQueue_DefaultCapacity(t *testing.T) {
 	}
 }
 
-// Review Focus 3: Enqueue after the drain has begun returns ErrDraining at
-// once, never blocks, and never hands the item to the handler.
-func TestQueue_EnqueueAfterDrain(t *testing.T) {
+// Enqueue once Shutdown has begun returns ErrDraining at once, never blocks,
+// and never hands the item to the handler. The refusal comes before the push:
+// with the store full, it is ErrDraining, not ErrQueueFull.
+func TestQueue_EnqueueAfterShutdown(t *testing.T) {
 	p := jobs.New()
 	entered := make(chan int, 4)
 	release := make(chan struct{})
@@ -183,26 +184,34 @@ func TestQueue_EnqueueAfterDrain(t *testing.T) {
 		t.Fatalf("handled %d first, want 1", got)
 	}
 	// The worker is held on item 1, and item 2 fills the store: a blocking
-	// send would now block, and a Push before the drain check would return
+	// send would now block, and a Push before the check would return
 	// ErrQueueFull.
 	if err := q.Enqueue(context.Background(), 2); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
+	shut := make(chan struct{})
+	go func() {
+		defer close(shut)
+		if err := p.Shutdown(context.Background()); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	}()
+	eventually(t, func() bool { return jobs.Closed(p) }, "Shutdown to begin")
 	res := make(chan error, 1)
 	go func() { res <- q.Enqueue(context.Background(), 3) }()
 	select {
 	case err := <-res:
 		if !errors.Is(err, jobs.ErrDraining) {
-			t.Fatalf("Enqueue after the drain: %v, want ErrDraining", err)
+			t.Fatalf("Enqueue after Shutdown began: %v, want ErrDraining", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Enqueue after the drain blocked")
+		t.Fatal("Enqueue after Shutdown began blocked")
 	}
 
 	close(release)
 	released = true
-	settled(t, q)
+	<-shut
 	if got := <-entered; got != 2 {
 		t.Fatalf("handled %d second, want 2", got)
 	}
@@ -211,9 +220,9 @@ func TestQueue_EnqueueAfterDrain(t *testing.T) {
 	}
 }
 
-// An Enqueue after the drain is refused, not stored, even when the store has
-// room: the item never reaches the handler.
-func TestQueue_DrainRefusedWithRoom(t *testing.T) {
+// The drain stops the scheduler, not the queues: the server still serves on
+// purpose, so an Enqueue then is accepted and handled.
+func TestQueue_DrainAccepts(t *testing.T) {
 	p := jobs.New()
 	entered := make(chan int, 4)
 	release := make(chan struct{})
@@ -237,15 +246,10 @@ func TestQueue_DrainRefusedWithRoom(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-entered // the worker is held on item 1
-	if err := q.Enqueue(context.Background(), 2); err != nil {
-		t.Fatal(err)
-	}
 	cancel()
-	if err := q.Enqueue(context.Background(), 3); !errors.Is(err, jobs.ErrDraining) {
-		t.Fatalf("Enqueue after the drain: %v, want ErrDraining", err)
-	}
-	if n := jobs.QueueLen(q); n != 1 {
-		t.Fatalf("%d queued after the refused Enqueue, want 1: item 3 got in", n)
+	eventually(t, func() bool { return jobs.Draining(p) }, "the drain to begin")
+	if err := q.Enqueue(context.Background(), 2); err != nil {
+		t.Fatalf("Enqueue during the drain: %v, want nil", err)
 	}
 
 	close(release)
@@ -320,13 +324,13 @@ func TestQueue_RetryWithBackoff(t *testing.T) {
 	if n := clk.Pending(); n != 0 {
 		t.Fatalf("%d timers pending after the success, want 0", n)
 	}
-	if n := l.count(slog.LevelWarn, "jobs: failed, will retry", "flaky"); n != 2 {
+	if n := l.count(slog.LevelWarn, "elagoht/jobs: failed, will retry", "flaky"); n != 2 {
 		t.Fatalf("%d retries logged, want 2", n)
 	}
-	if n := l.count(slog.LevelError, "jobs: failed", "flaky"); n != 0 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "flaky"); n != 0 {
 		t.Fatalf("%d failures logged, want 0", n)
 	}
-	if n := l.count(slog.LevelDebug, "jobs: ran", "flaky"); n != 1 {
+	if n := l.count(slog.LevelDebug, "elagoht/jobs: ran", "flaky"); n != 1 {
 		t.Fatalf("%d runs logged, want 1", n)
 	}
 }
@@ -362,10 +366,10 @@ func TestQueue_OnFailure(t *testing.T) {
 		t.Fatalf("OnFailure(%d, %v), want (9, attempt 2 failed)", f.item, f.err)
 	}
 	expectItems(t, &r, 9, 9)
-	if n := l.count(slog.LevelError, "jobs: failed", "doomed"); n != 1 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "doomed"); n != 1 {
 		t.Fatalf("%d failures logged, want 1", n)
 	}
-	if n := l.count(slog.LevelWarn, "jobs: failed, will retry", "doomed"); n != 1 {
+	if n := l.count(slog.LevelWarn, "elagoht/jobs: failed, will retry", "doomed"); n != 1 {
 		t.Fatalf("%d retries logged, want 1", n)
 	}
 	if n := clk.Pending(); n != 0 {
@@ -390,7 +394,7 @@ func TestQueue_OneAttemptByDefault(t *testing.T) {
 	if onFailure.Load() != 1 || clk.Pending() != 0 {
 		t.Fatalf("OnFailure %d times, %d timers pending; want 1 and 0", onFailure.Load(), clk.Pending())
 	}
-	if n := l.count(slog.LevelError, "jobs: failed", "once"); n != 1 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "once"); n != 1 {
 		t.Fatalf("%d failures logged, want 1", n)
 	}
 }
@@ -410,7 +414,7 @@ func TestQueue_PanicRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitPending(t, clk, 1)
-	if n := l.count(slog.LevelWarn, "jobs: failed, will retry", "panicky"); n != 1 {
+	if n := l.count(slog.LevelWarn, "elagoht/jobs: failed, will retry", "panicky"); n != 1 {
 		t.Fatalf("%d retries logged after the panic, want 1", n)
 	}
 	clk.Advance(time.Second)
@@ -418,7 +422,7 @@ func TestQueue_PanicRetried(t *testing.T) {
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("%d calls, want 2", n)
 	}
-	if n := l.count(slog.LevelError, "jobs: failed", "panicky"); n != 0 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "panicky"); n != 0 {
 		t.Fatalf("%d failures logged, want 0", n)
 	}
 }
@@ -438,7 +442,7 @@ func TestQueue_OnFailurePanicContained(t *testing.T) {
 	}
 	settled(t, q)
 	expectItems(t, &r, 0, 1) // the worker survived the first panic
-	if n := l.count(slog.LevelError, "jobs: OnFailure panicked", "bad-hook"); n != 2 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: OnFailure panicked", "bad-hook"); n != 2 {
 		t.Fatalf("%d OnFailure panics logged, want 2", n)
 	}
 }
@@ -493,9 +497,12 @@ func TestQueue_WorkersStartAfterEarlyDrain(t *testing.T) {
 	})
 	settled(t, q)
 	expectItems(t, &r, 1)
-	if err := q.Enqueue(context.Background(), 2); !errors.Is(err, jobs.ErrDraining) {
-		t.Fatalf("Enqueue: %v, want ErrDraining", err)
+	// The drain refuses nothing: only Shutdown does.
+	if err := q.Enqueue(context.Background(), 2); err != nil {
+		t.Fatalf("Enqueue after an early drain: %v, want nil", err)
 	}
+	settled(t, q)
+	expectItems(t, &r, 1, 2)
 }
 
 func TestBackoff(t *testing.T) {

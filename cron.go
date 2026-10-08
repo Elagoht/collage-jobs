@@ -194,6 +194,32 @@ func (c cronSpec) dayMatches(wall time.Time) bool {
 	return dom || dow
 }
 
+// monthDays is the most days each month can have, February's in a leap year.
+var monthDays = [13]int{0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+
+// possible reports whether c ever matches, in any year. Minute, hour, month
+// and day of week are never empty once parsed, so only the days can rule a
+// schedule out. When both day fields are restricted, a day matches on either,
+// and every month has every weekday. Otherwise both must match: over the
+// 400-year Gregorian cycle every date, February 29 included, falls on every
+// weekday, so c matches when one month it names has a day it names.
+func (c cronSpec) possible() bool {
+	if !c.domStar && !c.dowStar {
+		return true
+	}
+	for m := 1; m <= 12; m++ {
+		if c.month&(1<<uint(m)) == 0 {
+			continue
+		}
+		for d := 1; d <= monthDays[m]; d++ {
+			if c.dom&(1<<uint(d)) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // matchesWall reports whether a wall-clock time (held in UTC) matches all
 // five fields.
 func (c cronSpec) matchesWall(wall time.Time) bool {

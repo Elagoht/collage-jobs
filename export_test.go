@@ -24,8 +24,15 @@ func WaitIdle(p *Plugin, d time.Duration) bool {
 	}
 }
 
-// Draining reports p.draining().
-func Draining(p *Plugin) bool { return p.draining() }
+// Draining reports whether the drain has begun, or Shutdown has.
+func Draining(p *Plugin) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed.Load() || p.running != nil && p.running.Err() != nil
+}
+
+// Store is the queue's store interface, for the tests in package jobs_test.
+type Store[T any] = store[T]
 
 // Busy reports whether any scheduled job of p has a run in progress. A run's
 // outcome is logged before it stops counting as in progress.

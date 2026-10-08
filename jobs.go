@@ -20,9 +20,9 @@ const Name = "elagoht/jobs"
 
 const version = "0.1.0"
 
-// ErrDraining is returned for work handed to the plugin after the drain has
-// begun.
-var ErrDraining = errors.New("jobs: draining")
+// ErrDraining is returned by Enqueue once the plugin's Shutdown has begun. The
+// drain alone does not refuse work: the server still serves then, on purpose.
+var ErrDraining = errors.New("elagoht/jobs: draining")
 
 // Config configures the plugin.
 type Config struct {
@@ -36,7 +36,7 @@ type Plugin struct {
 	clock clock
 
 	// mu guards names, scheduled, queues, inited and running, and the write
-	// of closed. Enqueue checks for the drain and pushes under it, and start
+	// of closed. Enqueue checks closed and pushes under it, and start
 	// launches everything under it, so Shutdown, which sets closed under it,
 	// sees each of them either done in full or not begun.
 	mu        sync.Mutex
@@ -54,7 +54,8 @@ type Plugin struct {
 	// plugin starts, and done once the drain has begun.
 	running context.Context
 	// closed is set, under mu, when Shutdown begins. From then on Enqueue is
-	// refused, nothing starts, and an emptied queue's workers stop.
+	// refused, nothing starts, and an emptied queue's workers stop. The drain
+	// alone refuses no Enqueue.
 	closed atomic.Bool
 	// loopCtx ends the scheduler loops: it is done when running is, or when
 	// stopLoops is called.
@@ -110,12 +111,15 @@ func (p *Plugin) Every(name string, d time.Duration, fn func(context.Context) er
 
 // Cron defines a job that runs fn on a five-field cron expression (minute,
 // hour, day of month, month, day of week), read in the configured time zone.
-// It panics if expr does not parse, naming the field, and on the same misuse as
-// Every.
+// It panics if expr does not parse, naming the field, if it can never match,
+// as February 30 cannot, and on the same misuse as Every.
 func (p *Plugin) Cron(name, expr string, fn func(context.Context) error) *Job {
 	spec, err := parseCron(expr)
 	if err != nil {
 		panic(fmt.Sprintf("elagoht/jobs: job %q: %v", name, err))
+	}
+	if !spec.possible() {
+		panic(fmt.Sprintf("elagoht/jobs: job %q: cron %q never matches: no month it names has a day it names", name, expr))
 	}
 	return p.define(name, spec, fn)
 }
@@ -188,7 +192,7 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	}
 	cfg, err := collage.PluginConfig(host, p.cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("elagoht/jobs: config: %w", err)
 	}
 	zone := cfg.Timezone
 	if zone == "" {
@@ -196,7 +200,8 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	}
 	loc, err := time.LoadLocation(zone)
 	if err != nil {
-		return fmt.Errorf("elagoht/jobs: timezone %q: %w", zone, err)
+		// A minimal image without zoneinfo fails the same way as a typo.
+		return fmt.Errorf(`elagoht/jobs: timezone %q: %w (if the name is right, the image may lack time zone data: import _ "time/tzdata" in main)`, zone, err)
 	}
 	disabled := map[string]bool{}
 	for _, name := range cfg.Disabled {
@@ -224,26 +229,14 @@ func (p *Plugin) OnServe(ctx context.Context) { p.start(ctx) }
 // Shutdown. It panics before Init: start the application first.
 func (p *Plugin) Start(ctx context.Context) { p.start(ctx) }
 
-// draining reports whether the drain has begun, or Shutdown has.
-func (p *Plugin) draining() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.drainingLocked()
-}
-
-// drainingLocked is draining with p.mu held.
-func (p *Plugin) drainingLocked() bool {
-	return p.closed.Load() || p.running != nil && p.running.Err() != nil
-}
-
 // giveUp is how long Shutdown still waits, once it has cancelled the runs'
 // ctx, for the runs to return.
 const giveUp = time.Second
 
 // Shutdown stops the plugin. It is meant to come after the drain, as
 // App.Shutdown calls it, but does the drain's part too if that has not
-// happened: from its start, Enqueue returns ErrDraining and no job is
-// triggered, and Start or OnServe after it starts nothing.
+// happened. From its start Enqueue returns ErrDraining, no job is triggered,
+// and Start or OnServe after it starts nothing.
 //
 // Runs in progress finish, and each queue's workers keep taking queued items
 // until the queue is empty or ctx ends. Then the runs' ctx is cancelled, and
@@ -252,7 +245,7 @@ const giveUp = time.Second
 // returns. Such a run's goroutine lives on until the function returns, but the
 // plugin keeps no goroutine of its own waiting for it.
 //
-// Last, each queue that still has items logs at Warn "jobs: dropped queued
+// Last, each queue that still has items logs at Warn "elagoht/jobs: dropped queued
 // items". Its count is the items dropped: those left in the store, and those
 // waiting for a retry when the runs' ctx ended, which are dropped rather than
 // failed, so OnFailure is not called. Its abandoned is, after a give-up, the
@@ -290,7 +283,7 @@ func (p *Plugin) Shutdown(ctx context.Context) error {
 	for _, q := range queues {
 		dropped, abandoned := q.leftovers(gaveUp)
 		if dropped > 0 || abandoned > 0 {
-			p.log.Warn("jobs: dropped queued items", "queue", q.queueName(), "count", dropped, "abandoned", abandoned)
+			p.log.Warn("elagoht/jobs: dropped queued items", "queue", q.queueName(), "count", dropped, "abandoned", abandoned)
 		}
 	}
 	return nil
@@ -315,7 +308,7 @@ func (p *Plugin) wait(ctx context.Context) bool {
 	case <-timer.C:
 		// goroutines counts what is still going: the stuck runs, and for a
 		// queue's item, the worker running it.
-		p.log.Warn("jobs: gave up waiting for runs that ignore their ctx", "goroutines", p.active.Count(), "waited", giveUp)
+		p.log.Warn("elagoht/jobs: gave up waiting for runs that ignore their ctx", "goroutines", p.active.Count(), "waited", giveUp)
 		return true
 	}
 }

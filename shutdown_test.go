@@ -14,8 +14,8 @@ import (
 
 // The messages Shutdown logs.
 const (
-	droppedMsg = "jobs: dropped queued items"
-	gaveUpMsg  = "jobs: gave up waiting for runs that ignore their ctx"
+	droppedMsg = "elagoht/jobs: dropped queued items"
+	gaveUpMsg  = "elagoht/jobs: gave up waiting for runs that ignore their ctx"
 )
 
 // dropped returns the count logged by the dropped Warn for queue, and whether
@@ -345,7 +345,7 @@ func TestShutdown_BackoffDropped(t *testing.T) {
 	if n := onFailure.Load(); n != 0 {
 		t.Fatalf("OnFailure called %d times for an item dropped at shutdown", n)
 	}
-	if n := l.count(slog.LevelError, "jobs: failed", "retrying"); n != 0 {
+	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "retrying"); n != 0 {
 		t.Fatalf("%d final failures logged for an item dropped at shutdown", n)
 	}
 	if n, ok := l.dropped("retrying"); !ok || n != 1 {

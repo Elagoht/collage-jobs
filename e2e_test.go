@@ -91,8 +91,10 @@ func TestBuild_RunsNothing(t *testing.T) {
 }
 
 // End to end with a real server and the real clock: Shutdown begins the drain,
-// which stops the scheduler and refuses new items, and the queued items still
-// finish before ListenAndServe returns, without Shutdown waiting out its ctx.
+// which stops the scheduler but still accepts items, and the queued items,
+// those enqueued during the drain too, finish before ListenAndServe returns,
+// without Shutdown waiting out its ctx. Once the plugin's Shutdown has begun,
+// Enqueue is refused.
 func TestE2E_ServeAndDrain(t *testing.T) {
 	p := jobs.New()
 	var r runs
@@ -134,8 +136,8 @@ func TestE2E_ServeAndDrain(t *testing.T) {
 	}()
 	eventually(t, func() bool { return jobs.Draining(p) }, "the drain to begin")
 
-	if err := q.Enqueue(context.Background(), 99); !errors.Is(err, jobs.ErrDraining) {
-		t.Fatalf("Enqueue during the drain: %v, want ErrDraining", err)
+	if err := q.Enqueue(context.Background(), 99); err != nil {
+		t.Fatalf("Enqueue during the drain: %v, want nil", err)
 	}
 	// A run triggered just before the drain may still finish within 50ms;
 	// after that the count must not move. Waiting on real time can only miss a
@@ -161,8 +163,11 @@ func TestE2E_ServeAndDrain(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("ListenAndServe did not return after Shutdown")
 	}
-	if n := handled.Load(); n != 5 {
-		t.Fatalf("%d queued items finished, want 5", n)
+	if n := handled.Load(); n != 6 {
+		t.Fatalf("%d queued items finished, want 6: five before the drain and one during it", n)
+	}
+	if err := q.Enqueue(context.Background(), 100); !errors.Is(err, jobs.ErrDraining) {
+		t.Fatalf("Enqueue after Shutdown: %v, want ErrDraining", err)
 	}
 	if _, ok := l.dropped("work"); ok {
 		t.Fatal("a drop was logged though every item finished")

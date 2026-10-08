@@ -2,9 +2,11 @@ package jobs
 
 import "context"
 
-// Store holds a queue's waiting items. The in-memory store is the only
-// implementation: its items are lost when the process ends.
-type Store[T any] interface {
+// store holds a queue's waiting items. The in-memory store is the only
+// implementation: its items are lost when the process ends. It stays
+// unexported until a persistent store exists, whose needs (a ctx on Push, an
+// acknowledgement after handling) will reshape it.
+type store[T any] interface {
 	// Push adds item, or returns ErrQueueFull when the store is full. It
 	// never blocks.
 	Push(item T) error
@@ -16,8 +18,10 @@ type Store[T any] interface {
 	Len() int
 }
 
-// memStore is a Store on a buffered channel.
+// memStore is a store on a buffered channel.
 type memStore[T any] struct{ ch chan T }
+
+var _ store[int] = (*memStore[int])(nil)
 
 func newMemStore[T any](capacity int) *memStore[T] {
 	return &memStore[T]{ch: make(chan T, capacity)}
