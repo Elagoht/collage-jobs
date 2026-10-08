@@ -6,6 +6,4 @@ module github.com/Elagoht/collage-jobs
 
 go 1.26
 
-require github.com/Elagoht/collage v0.54.0
-
-replace github.com/Elagoht/collage => ../collage-jobs-core
+require github.com/Elagoht/collage v0.55.0
