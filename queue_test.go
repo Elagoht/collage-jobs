@@ -212,6 +212,82 @@ func TestQueue_EnqueueAfterDrain(t *testing.T) {
 	}
 }
 
+// An Enqueue after the drain is refused, not stored, even when the store has
+// room: the item never reaches the handler.
+func TestQueue_DrainRefusedWithRoom(t *testing.T) {
+	p := jobs.New()
+	entered := make(chan int, 4)
+	release := make(chan struct{})
+	q := jobs.NewQueue(p, "mail", func(_ context.Context, item int) error {
+		entered <- item
+		if item == 1 {
+			<-release
+		}
+		return nil
+	}, jobs.QueueOptions[int]{Capacity: 2})
+	setup(t, p, "")
+	cancel := serveQueues(t, p)
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+
+	if err := q.Enqueue(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	<-entered // the worker is held on item 1
+	if err := q.Enqueue(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := q.Enqueue(context.Background(), 3); !errors.Is(err, jobs.ErrDraining) {
+		t.Fatalf("Enqueue after the drain: %v, want ErrDraining", err)
+	}
+	if n := jobs.QueueLen(q); n != 1 {
+		t.Fatalf("%d queued after the refused Enqueue, want 1: item 3 got in", n)
+	}
+
+	close(release)
+	released = true
+	settled(t, q)
+	if got := <-entered; got != 2 {
+		t.Fatalf("handled %d second, want 2", got)
+	}
+	if n := len(entered); n != 0 {
+		t.Fatalf("%d more items handled, want 0", n)
+	}
+}
+
+// The worker that took an item retries it, and takes nothing else while it
+// waits for the backoff: with one worker, items keep their order.
+func TestQueue_SameWorkerRetries(t *testing.T) {
+	p := jobs.New()
+	r := recorder{fail: 1}
+	q := jobs.NewQueue(p, "ordered", r.fn, jobs.QueueOptions[int]{Workers: 1, MaxAttempts: 2})
+	_, clk := setup(t, p, "")
+	serveQueues(t, p)
+	for _, item := range []int{1, 2} {
+		if err := q.Enqueue(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitPending(t, clk, 1) // item 1 failed and waits for its retry
+	// A retry handed to another goroutine would free the worker to take item
+	// 2. Waiting on real time can only miss that bug, never fail a correct
+	// plugin.
+	time.Sleep(50 * time.Millisecond)
+	if n := jobs.QueueLen(q); n != 1 {
+		t.Fatalf("%d queued while the worker waits for its retry, want 1", n)
+	}
+	expectItems(t, &r, 1)
+
+	clk.Advance(time.Second)
+	settled(t, q)
+	expectItems(t, &r, 1, 1, 2)
+}
+
 func TestQueue_RetryWithBackoff(t *testing.T) {
 	p := jobs.New()
 	r := recorder{fail: 2}
@@ -446,30 +522,30 @@ func TestQueue_Misuse(t *testing.T) {
 	cases := []struct {
 		name string
 		want string // in the panic message
-		do   func()
+		do   func(t *testing.T)
 	}{
-		{"job then queue", `"a"`, func() {
+		{"job then queue", `"a"`, func(*testing.T) {
 			p := jobs.New()
 			p.Every("a", time.Minute, nop)
 			jobs.NewQueue(p, "a", nopItem, jobs.QueueOptions[int]{})
 		}},
-		{"queue then job", `"a"`, func() {
+		{"queue then job", `"a"`, func(*testing.T) {
 			p := jobs.New()
 			jobs.NewQueue(p, "a", nopItem, jobs.QueueOptions[int]{})
 			p.Cron("a", "* * * * *", nop)
 		}},
-		{"queue then queue", `"a"`, func() {
+		{"queue then queue", `"a"`, func(*testing.T) {
 			p := jobs.New()
 			jobs.NewQueue(p, "a", nopItem, jobs.QueueOptions[int]{})
 			jobs.NewQueue(p, "a", func(context.Context, string) error { return nil }, jobs.QueueOptions[string]{})
 		}},
-		{"empty name", "name", func() { jobs.NewQueue(jobs.New(), "", nopItem, jobs.QueueOptions[int]{}) }},
-		{"nil fn", "nil", func() { jobs.NewQueue[int](jobs.New(), "a", nil, jobs.QueueOptions[int]{}) }},
-		{"negative Workers", "Workers", func() { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{Workers: -1}) }},
-		{"negative Capacity", "Capacity", func() { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{Capacity: -1}) }},
-		{"negative MaxAttempts", "MaxAttempts", func() { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{MaxAttempts: -1}) }},
-		{"nil plugin", "plugin", func() { jobs.NewQueue(nil, "a", nopItem, jobs.QueueOptions[int]{}) }},
-		{"after Init", "after Init", func() {
+		{"empty name", "name", func(*testing.T) { jobs.NewQueue(jobs.New(), "", nopItem, jobs.QueueOptions[int]{}) }},
+		{"nil fn", "nil", func(*testing.T) { jobs.NewQueue[int](jobs.New(), "a", nil, jobs.QueueOptions[int]{}) }},
+		{"negative Workers", "Workers", func(*testing.T) { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{Workers: -1}) }},
+		{"negative Capacity", "Capacity", func(*testing.T) { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{Capacity: -1}) }},
+		{"negative MaxAttempts", "MaxAttempts", func(*testing.T) { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{MaxAttempts: -1}) }},
+		{"nil plugin", "plugin", func(*testing.T) { jobs.NewQueue(nil, "a", nopItem, jobs.QueueOptions[int]{}) }},
+		{"after Init", "after Init", func(t *testing.T) {
 			p := jobs.New()
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
@@ -495,7 +571,7 @@ func TestQueue_Misuse(t *testing.T) {
 					t.Fatalf("panic %q, want one prefixed elagoht/jobs: and naming %q", msg, c.want)
 				}
 			}()
-			c.do()
+			c.do(t)
 		})
 	}
 }

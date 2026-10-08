@@ -17,7 +17,8 @@ var ErrQueueFull = errors.New("jobs: queue full")
 type QueueOptions[T any] struct {
 	// Workers is how many items are handled at the same time, default 1.
 	Workers int
-	// Capacity is how many items can wait, default 1000.
+	// Capacity is how many items can wait, default 1000. The store for them
+	// is allocated up front, when the queue is defined.
 	Capacity int
 	// MaxAttempts is how many times an item is tried, default 1: no retry.
 	// Retries wait 1s, 2s, 4s… up to a minute.
@@ -66,11 +67,11 @@ func NewQueue[T any](p *Plugin, name string, fn func(context.Context, T) error, 
 			*o.v = o.def
 		}
 	}
-	p.register(name)
-	q := &Queue[T]{p: p, name: name, fn: fn, opts: opts, store: newMemStore[T](opts.Capacity)}
-	p.mu.Lock()
-	p.queues = append(p.queues, q)
-	p.mu.Unlock()
+	q := &Queue[T]{p: p, name: name, fn: fn, opts: opts}
+	p.register(name, func() {
+		q.store = newMemStore[T](opts.Capacity) // only once the name is taken: a misuse panic allocates nothing
+		p.queues = append(p.queues, q)
+	})
 	return q
 }
 

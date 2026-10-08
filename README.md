@@ -120,7 +120,7 @@ if err := mail.Enqueue(r.Context(), Email{To: to}); err != nil {
 | Option | Default | |
 | --- | --- | --- |
 | `Workers` | `1` | How many items are handled at the same time |
-| `Capacity` | `1000` | How many items can wait. `Enqueue` on a full queue returns `ErrQueueFull` |
+| `Capacity` | `1000` | How many items can wait. The store for them is allocated up front, when the queue is defined. `Enqueue` on a full queue returns `ErrQueueFull` |
 | `MaxAttempts` | `1` | How many times an item is tried. `1` means no retry |
 | `OnFailure` | none | `func(ctx, item, err)`, called once with the last error when every attempt has failed |
 
@@ -129,9 +129,9 @@ How queues behave:
 - **Enqueue never blocks.** It returns `ErrQueueFull` when the queue holds
   `Capacity` items, and `ErrDraining` once the drain has begun. An item is
   either queued or refused with an error, never silently dropped.
-- **Before serving**, items wait in the queue. The workers start with the
-  scheduled jobs, in `OnServe` or `Start`, so nothing is handled in
-  `collage build`, CLI commands or tests that never serve.
+- **Before serving**, items wait in the queue. The workers start in `OnServe`
+  or `Start`, so nothing is handled in `collage build`, CLI commands or tests
+  that never serve.
 - **Retries.** An error or a panic is a failed attempt. A failed attempt with
   attempts left is logged at Warn, and the same worker retries the item after
   1s, 2s, 4s… capped at a minute. A worker keeps its items in order, and

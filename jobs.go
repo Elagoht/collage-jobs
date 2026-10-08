@@ -119,17 +119,15 @@ func (p *Plugin) define(name string, s schedule, fn func(context.Context) error)
 	if fn == nil {
 		panic(fmt.Sprintf("elagoht/jobs: job %q: the function is nil", name))
 	}
-	p.register(name)
 	j := &Job{p: p, name: name, sched: s, fn: fn}
-	p.mu.Lock()
-	p.scheduled = append(p.scheduled, j)
-	p.mu.Unlock()
+	p.register(name, func() { p.scheduled = append(p.scheduled, j) })
 	return j
 }
 
-// register takes name for a job or a queue. It panics if name is empty or
-// already taken, or if Init has run.
-func (p *Plugin) register(name string) {
+// register takes name for a job or a queue and calls add, both under one hold
+// of p.mu, so that Init sees a name only together with what it names. It
+// panics if name is empty or already taken, or if Init has run.
+func (p *Plugin) register(name string, add func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	switch {
@@ -141,6 +139,7 @@ func (p *Plugin) register(name string) {
 		panic(fmt.Sprintf("elagoht/jobs: the name %q is taken by another job or queue", name))
 	}
 	p.names[name] = true
+	add()
 }
 
 // RunOnStart makes the job also run as soon as the plugin starts. It panics

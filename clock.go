@@ -13,7 +13,9 @@ type clock interface {
 	Now() time.Time
 	// After returns a channel that receives once d has passed. ctx is the
 	// waiter's lifetime: the waiter passes the same ctx each time it waits,
-	// and cancels it when it stops waiting for good.
+	// and cancels it when it stops waiting for good. A waiter may instead use
+	// a ctx per wait, cancelled once that wait is over, as a queue's backoff
+	// does; see fakeClock for what that means in tests.
 	After(ctx context.Context, d time.Duration) <-chan time.Time
 }
 
@@ -29,6 +31,11 @@ func (realClock) After(_ context.Context, d time.Duration) <-chan time.Time { re
 // gives up on it when the waiter's ctx ends. Then it waits until that waiter
 // arms again with the same ctx, or its ctx ends. So a waiter that re-arms after
 // each trigger sees every trigger one Advance passes, in time order.
+//
+// A waiter with a ctx per wait (a queue's backoff) is done once its ctx ends,
+// which is before it arms its next wait under a new ctx. Whether one Advance
+// also fires that next wait is a race, so step such a waiter one backoff per
+// Advance, waiting for its next timer to be pending in between.
 type fakeClock struct {
 	mu     sync.Mutex
 	cond   *sync.Cond // broadcast when a waiter arms or a waiter's ctx ends
