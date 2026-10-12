@@ -53,7 +53,7 @@ func freePort(t *testing.T) int {
 // Review Focus 5: a static build of an application using jobs runs no job and
 // handles no queued item, though the build initialises the plugin.
 func TestBuild_RunsNothing(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Millisecond, r.fn).RunOnStart()
 	var handled atomic.Int32
@@ -92,7 +92,7 @@ func TestBuild_RunsNothing(t *testing.T) {
 // without Shutdown waiting out its ctx. Once the plugin's Shutdown has begun,
 // Enqueue is refused.
 func TestE2E_ServeAndDrain(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", 20*time.Millisecond, r.fn)
 	var handled atomic.Int32

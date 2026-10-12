@@ -2,18 +2,17 @@ package jobs_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	jobs "github.com/Elagoht/collage-jobs"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 // t0 is where every fake clock starts: 2026-10-08T00:00:00Z.
@@ -64,26 +63,15 @@ func (l *logs) count(level slog.Level, msg, job string) int {
 // Init. It returns Start's error.
 func newApp(t *testing.T, p *jobs.Plugin, config string, l *logs) error {
 	t.Helper()
-	var pc map[string]json.RawMessage
+	options := []collagetest.SiteOption{
+		collagetest.WithPlugins(p),
+		collagetest.WithConfig(func(c *collage.Config) { c.Logger = slog.New(l) }),
+	}
 	if config != "" {
-		pc = map[string]json.RawMessage{jobs.Name: json.RawMessage(config)}
+		options = append(options, collagetest.WithPluginConfig(jobs.Name, config))
 	}
-	a, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Logger: slog.New(l),
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<main>home</main>`)},
-		}, Root: "t"},
-		Plugins:      []collage.Plugin{p},
-		PluginConfig: pc,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
-		t.Fatal(err)
-	}
-	return a.Start()
+	_, err := collagetest.TrySite(t, options...)
+	return err
 }
 
 // setup puts p on a fake clock at t0 and runs its Init through an application
@@ -169,7 +157,7 @@ func step(t *testing.T, p *jobs.Plugin, clk *jobs.FakeClock, d time.Duration, n 
 }
 
 func TestDisabled(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var off, on runs
 	p.Every("off", time.Minute, off.fn).RunOnStart()
 	p.Every("on", time.Minute, on.fn)
@@ -181,16 +169,16 @@ func TestDisabled(t *testing.T) {
 }
 
 func TestDisabled_UnknownName(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	p.Every("on", time.Minute, func(context.Context) error { return nil })
 	err := newApp(t, p, `{"disabled": ["nope"]}`, &logs{})
-	if err == nil || !strings.Contains(err.Error(), "elagoht/jobs: ") || !strings.Contains(err.Error(), `"nope"`) {
+	if err == nil || !strings.Contains(err.Error(), "jobs: ") || !strings.Contains(err.Error(), `"nope"`) {
 		t.Fatalf("Init error %v, want one naming \"nope\"", err)
 	}
 }
 
-func TestDisabled_FromNewWith(t *testing.T) {
-	p := jobs.NewWith(jobs.Config{Disabled: []string{"off"}})
+func TestDisabled_FromOptions(t *testing.T) {
+	p := jobs.New(jobs.Options{Disabled: []string{"off"}})
 	var off runs
 	p.Every("off", time.Minute, off.fn)
 	p.Every("on", time.Minute, func(context.Context) error { return nil })
@@ -201,10 +189,10 @@ func TestDisabled_FromNewWith(t *testing.T) {
 }
 
 func TestInit_BadTimezone(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	err := newApp(t, p, `{"timezone": "Mars/Olympus_Mons"}`, &logs{})
-	if err == nil || !strings.Contains(err.Error(), "elagoht/jobs: timezone") {
-		t.Fatalf("Init error %v, want an elagoht/jobs timezone error", err)
+	if err == nil || !strings.Contains(err.Error(), "jobs: timezone") {
+		t.Fatalf("Init error %v, want a jobs timezone error", err)
 	}
 	if !strings.Contains(err.Error(), "Mars/Olympus_Mons") {
 		t.Fatalf("Init error %v does not name the zone", err)
@@ -217,15 +205,15 @@ func TestInit_BadTimezone(t *testing.T) {
 }
 
 func TestInit_BadConfig(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	err := newApp(t, p, `{"timezone": 3}`, &logs{})
-	if err == nil || !strings.Contains(err.Error(), "elagoht/jobs: config") {
-		t.Fatalf("Init error %v, want an elagoht/jobs config error", err)
+	if err == nil || !strings.Contains(err.Error(), "jobs") || !strings.Contains(err.Error(), "timezone") {
+		t.Fatalf("Init error %v, want a jobs config error naming timezone", err)
 	}
 }
 
 func TestInit_Twice(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	if err := newApp(t, p, "", &logs{}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,37 +230,37 @@ func TestMisuse(t *testing.T) {
 		do   func(t *testing.T)
 	}{
 		{"duplicate name", `"a"`, func(*testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			p.Every("a", time.Minute, nop)
 			p.Cron("a", "* * * * *", nop)
 		}},
-		{"empty name", "name", func(*testing.T) { jobs.New().Every("", time.Minute, nop) }},
-		{"nil Every fn", "nil", func(*testing.T) { jobs.New().Every("a", time.Minute, nil) }},
-		{"nil Cron fn", "nil", func(*testing.T) { jobs.New().Cron("a", "* * * * *", nil) }},
-		{"zero interval", "interval", func(*testing.T) { jobs.New().Every("a", 0, nop) }},
-		{"negative timeout", "timeout", func(*testing.T) { jobs.New().Every("a", time.Minute, nop).Timeout(-time.Second) }},
-		{"bad cron", "day of month", func(*testing.T) { jobs.New().Cron("a", "0 3 32 * *", nop) }},
-		{"February 30", "never matches", func(*testing.T) { jobs.New().Cron("a", "0 0 30 2 *", nop) }},
-		{"31st of a short month", "never matches", func(*testing.T) { jobs.New().Cron("a", "0 0 31 4,6,9,11 *", nop) }},
+		{"empty name", "name", func(*testing.T) { jobs.New(jobs.Options{}).Every("", time.Minute, nop) }},
+		{"nil Every fn", "nil", func(*testing.T) { jobs.New(jobs.Options{}).Every("a", time.Minute, nil) }},
+		{"nil Cron fn", "nil", func(*testing.T) { jobs.New(jobs.Options{}).Cron("a", "* * * * *", nil) }},
+		{"zero interval", "interval", func(*testing.T) { jobs.New(jobs.Options{}).Every("a", 0, nop) }},
+		{"negative timeout", "timeout", func(*testing.T) { jobs.New(jobs.Options{}).Every("a", time.Minute, nop).Timeout(-time.Second) }},
+		{"bad cron", "day of month", func(*testing.T) { jobs.New(jobs.Options{}).Cron("a", "0 3 32 * *", nop) }},
+		{"February 30", "never matches", func(*testing.T) { jobs.New(jobs.Options{}).Cron("a", "0 0 30 2 *", nop) }},
+		{"31st of a short month", "never matches", func(*testing.T) { jobs.New(jobs.Options{}).Cron("a", "0 0 31 4,6,9,11 *", nop) }},
 		// A day of week starting with "*" makes the two day fields combine
 		// with AND, so February 30 still never comes.
-		{"February 30 on a starred weekday", "never matches", func(*testing.T) { jobs.New().Cron("a", "0 0 30 2 */2", nop) }},
+		{"February 30 on a starred weekday", "never matches", func(*testing.T) { jobs.New(jobs.Options{}).Cron("a", "0 0 30 2 */2", nop) }},
 		{"Every after Init", "after Init", func(t *testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
 			}
 			p.Every("a", time.Minute, nop)
 		}},
 		{"Cron after Init", "after Init", func(t *testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
 			}
 			p.Cron("a", "* * * * *", nop)
 		}},
 		{"RunOnStart after Init", "after Init", func(t *testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			j := p.Every("a", time.Minute, nop)
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
@@ -280,14 +268,14 @@ func TestMisuse(t *testing.T) {
 			j.RunOnStart()
 		}},
 		{"Timeout after Init", "after Init", func(t *testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			j := p.Every("a", time.Minute, nop)
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
 			}
 			j.Timeout(time.Second)
 		}},
-		{"Start before Init", "Init", func(*testing.T) { jobs.New().Start(context.Background()) }},
+		{"Start before Init", "Init", func(*testing.T) { jobs.New(jobs.Options{}).Start(context.Background()) }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -303,8 +291,8 @@ func TestMisuse(t *testing.T) {
 				case error:
 					msg = v.Error()
 				}
-				if !strings.HasPrefix(msg, "elagoht/jobs: ") || !strings.Contains(msg, c.want) {
-					t.Fatalf("panic %q, want one prefixed elagoht/jobs: and naming %q", msg, c.want)
+				if !strings.HasPrefix(msg, "jobs: ") || !strings.Contains(msg, c.want) {
+					t.Fatalf("panic %q, want one prefixed jobs: and naming %q", msg, c.want)
 				}
 			}()
 			c.do(t)
@@ -331,20 +319,20 @@ func TestCron_RareButPossible(t *testing.T) {
 					t.Fatalf("Cron(%q) panicked: %v", expr, r)
 				}
 			}()
-			jobs.New().Cron("a", expr, nop)
+			jobs.New(jobs.Options{}).Cron("a", expr, nop)
 		})
 	}
 }
 
 func TestErrDraining(t *testing.T) {
-	if !errors.Is(jobs.ErrDraining, jobs.ErrDraining) || jobs.ErrDraining.Error() != "elagoht/jobs: draining" {
+	if !errors.Is(jobs.ErrDraining, jobs.ErrDraining) || jobs.ErrDraining.Error() != "jobs: draining" {
 		t.Fatalf("ErrDraining = %v", jobs.ErrDraining)
 	}
 }
 
 func TestNameAndVersion(t *testing.T) {
-	p := jobs.New()
-	if p.Name() != "elagoht/jobs" || p.Version() != "0.1.1" {
+	p := jobs.New(jobs.Options{})
+	if p.Name() != "elagoht/jobs" || p.Version() != "0.2.0" {
 		t.Fatalf("Name %q Version %q", p.Name(), p.Version())
 	}
 }

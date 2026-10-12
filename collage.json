@@ -3,6 +3,7 @@
   "name": "elagoht/jobs",
   "description": "Package jobs runs scheduled jobs and typed background queues, only while the application serves, and finishes queued work on shutdown.",
   "repository": "https://github.com/Elagoht/collage-jobs",
+  "setup": "Jobs are defined on the plugin, so keep it in a variable in `plugins.go` — `jobsPlugin := jobs.New(jobs.Options{})` — define them with `jobsPlugin.Every`, `jobsPlugin.Cron` or `jobs.NewQueue` before the application starts, and put `jobsPlugin` in the plugins list.",
   "config": {
     "type": "object",
     "description": "Package jobs runs scheduled jobs and typed background queues, only while the application serves, and finishes queued work on shutdown.",

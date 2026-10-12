@@ -14,8 +14,8 @@ import (
 
 // The messages Shutdown logs.
 const (
-	droppedMsg = "elagoht/jobs: dropped queued items"
-	gaveUpMsg  = "elagoht/jobs: gave up waiting for runs that ignore their ctx"
+	droppedMsg = "jobs: dropped queued items"
+	gaveUpMsg  = "jobs: gave up waiting for runs that ignore their ctx"
 )
 
 // dropped returns the count logged by the dropped Warn for queue, and whether
@@ -77,7 +77,7 @@ func expectIdle(t *testing.T, p *jobs.Plugin) {
 // Shutdown lets the workers finish what is queued and returns as soon as the
 // queue is empty, long before its ctx ends.
 func TestShutdown_FinishesQueued(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	gate := make(chan struct{})
 	var handled atomic.Int32
 	q := jobs.NewQueue(p, "work", func(_ context.Context, item int) error {
@@ -130,7 +130,7 @@ func TestShutdown_FinishesQueued(t *testing.T) {
 
 // Workers idle on an empty queue stop at once when Shutdown begins.
 func TestShutdown_IdleWorkersStopAtOnce(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	jobs.NewQueue(p, "idle", func(context.Context, int) error { return nil }, jobs.QueueOptions[int]{Workers: 3})
 	setup(t, p, "")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -147,7 +147,7 @@ func TestShutdown_IdleWorkersStopAtOnce(t *testing.T) {
 // ctx ends and the cancelled runs return, cancels the runs' ctx, and logs how
 // many items were dropped.
 func TestShutdown_DropsAndLogs(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	entered := make(chan struct{}, 1)
 	var sawCancel atomic.Bool
 	q := jobs.NewQueue(p, "full", func(ctx context.Context, _ int) error {
@@ -191,7 +191,7 @@ func TestShutdown_DropsAndLogs(t *testing.T) {
 // cancelling, and says so. The stuck run's item is logged as abandoned, beside
 // the queued one dropped behind it.
 func TestShutdown_IgnoringJobDoesNotHang(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	q := jobs.NewQueue(p, "stubborn", func(context.Context, int) error {
@@ -252,7 +252,7 @@ func TestShutdown_IgnoringJobDoesNotHang(t *testing.T) {
 // Shutdown before the plugin starts returns at once, and closes it: a Start
 // after it launches nothing, and Enqueue is refused.
 func TestShutdown_BeforeStart(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Millisecond, r.fn).RunOnStart()
 	var handled atomic.Int32
@@ -297,7 +297,7 @@ func TestShutdown_BeforeStart(t *testing.T) {
 // Shutdown without a drain first, its serve ctx still live, stops the
 // scheduler and refuses new items.
 func TestShutdown_WithoutDrain(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Minute, r.fn)
 	q := jobs.NewQueue(p, "q", func(context.Context, int) error { return nil }, jobs.QueueOptions[int]{})
@@ -324,7 +324,7 @@ func TestShutdown_WithoutDrain(t *testing.T) {
 // An item waiting for a retry when the runs' ctx ends is dropped: counted in
 // the dropped Warn, neither a final failure nor handed to OnFailure.
 func TestShutdown_BackoffDropped(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var onFailure atomic.Int32
 	r := recorder{fail: 100}
 	q := jobs.NewQueue(p, "retrying", r.fn, jobs.QueueOptions[int]{
@@ -345,7 +345,7 @@ func TestShutdown_BackoffDropped(t *testing.T) {
 	if n := onFailure.Load(); n != 0 {
 		t.Fatalf("OnFailure called %d times for an item dropped at shutdown", n)
 	}
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "retrying"); n != 0 {
+	if n := l.count(slog.LevelError, "jobs: failed", "retrying"); n != 0 {
 		t.Fatalf("%d final failures logged for an item dropped at shutdown", n)
 	}
 	if n, ok := l.dropped("retrying"); !ok || n != 1 {
@@ -377,7 +377,7 @@ func TestStore_PopCancelledTakesNothing(t *testing.T) {
 // as dropped, or is refused: no item is accepted and then lost unlogged.
 func TestShutdown_EnqueueRace(t *testing.T) {
 	for round := range 20 {
-		p := jobs.New()
+		p := jobs.New(jobs.Options{})
 		var handled atomic.Int64
 		q := jobs.NewQueue(p, "race", func(context.Context, int) error { handled.Add(1); return nil },
 			jobs.QueueOptions[int]{Workers: 2, Capacity: 100000})
@@ -435,7 +435,7 @@ func (s *heldStore) Push(item int) error {
 // counted dropped, never accepted and lost. Deterministic where
 // TestShutdown_EnqueueRace is a soak.
 func TestShutdown_EnqueueHeldInPush(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var handled atomic.Int64
 	q := jobs.NewQueue(p, "held", func(context.Context, int) error { handled.Add(1); return nil }, jobs.QueueOptions[int]{})
 	hs := &heldStore{inPush: make(chan struct{}), release: make(chan struct{})}

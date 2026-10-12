@@ -16,7 +16,7 @@ func (p *Plugin) start(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.inited {
-		panic("elagoht/jobs: Start before Init: start the application (app.Start or app.Handler) first")
+		panic("jobs: Start before Init: start the application (app.Start or app.Handler) first")
 	}
 	if p.running != nil || p.closed.Load() {
 		return
@@ -58,7 +58,7 @@ func (p *Plugin) loop(ctx context.Context, j *Job) {
 		now := p.clock.Now()
 		next := nextTrigger(j.sched, p.loc, now, last)
 		if next.IsZero() {
-			p.log.Warn("elagoht/jobs: the schedule has no next time; the job stops", "job", j.name)
+			p.log.Warn("jobs: the schedule has no next time; the job stops", "job", j.name)
 			return
 		}
 		select {
@@ -103,7 +103,7 @@ func (p *Plugin) trigger(j *Job) {
 		return // Shutdown has begun, and stops the loops next
 	}
 	if !j.busy.CompareAndSwap(false, true) {
-		p.log.Debug("elagoht/jobs: skipped, the previous run is still in progress", "job", j.name)
+		p.log.Debug("jobs: skipped, the previous run is still in progress", "job", j.name)
 		return
 	}
 	p.active.Add(1)
@@ -126,10 +126,10 @@ func (p *Plugin) run(j *Job) {
 	err := call(ctx, j.fn)
 	took := time.Since(began)
 	if err != nil {
-		p.log.Error("elagoht/jobs: failed", "job", j.name, "duration", took, "error", err)
+		p.log.Error("jobs: failed", "job", j.name, "duration", took, "error", err)
 		return
 	}
-	p.log.Debug("elagoht/jobs: ran", "job", j.name, "duration", took)
+	p.log.Debug("jobs: ran", "job", j.name, "duration", took)
 }
 
 // call runs fn, turning a panic into an error that carries the stack.

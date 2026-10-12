@@ -19,14 +19,14 @@ drain begins.
 > if os.Getenv("RUN_JOBS") != "1" {
 > 	off = []string{"cleanup"}
 > }
-> j := jobs.NewWith(jobs.Config{Disabled: off})
+> j := jobs.New(jobs.Options{Disabled: off})
 > ```
 
 ```sh
 go get github.com/Elagoht/collage-jobs
 ```
 
-Requires collage v0.55.0 or later, for `ServeHook`.
+Requires collage v0.61.0 or later.
 
 ```json
 {
@@ -38,7 +38,7 @@ Requires collage v0.55.0 or later, for `ServeHook`.
 ```
 
 ```go
-j := jobs.New()
+j := jobs.New(jobs.Options{})
 j.Every("refresh-feed", 15*time.Minute, refreshFeed).RunOnStart()
 j.Cron("cleanup", "0 3 * * *", cleanup).Timeout(10 * time.Minute)
 
@@ -46,6 +46,11 @@ app, err := collage.New(&collage.Config{
 	Plugins: []collage.Plugin{j},
 })
 ```
+
+Keep the plugin in a variable, as `j` above: jobs and queues are defined on it
+before the application starts. `collage plugin add` writes
+`jobs.New(jobs.Options{})` straight into the plugins list, where nothing can call
+`Every` on it; move it into a variable in `plugins.go`.
 
 ## Scheduled jobs
 
@@ -166,7 +171,7 @@ nil function, a negative option, or a queue defined after `Init`.
 | `timezone` | `"UTC"` | IANA time zone cron expressions are read in. An invalid zone fails startup |
 | `disabled` | `[]` | Names of scheduled jobs that do not run. An unknown name fails startup |
 
-From Go, `jobs.NewWith(jobs.Config{Timezone: "Europe/Istanbul"})` sets the
+From Go, `jobs.New(jobs.Options{Timezone: "Europe/Istanbul"})` sets the
 defaults that configuration starts from.
 
 The time zone is read from the system's zoneinfo. A minimal image without it,
@@ -190,7 +195,7 @@ per path in the build, and twice more per path in the capture
 enqueued in a build or a command is accepted and never handled. A project
 scaffolded by collage v0.55.0 or later shuts the application down at the end
 of a build or a command, so such items are at least logged as
-`elagoht/jobs: dropped queued items`; an older project's `main.go` needs the
+`jobs: dropped queued items`; an older project's `main.go` needs the
 same `app.Shutdown` call added to log them. Enqueue from actions, which a build
 never runs, or skip the enqueue when `collage.IsCapture(ctx)` is true. With
 more than `Capacity` paths a build also fills the queue, and `Enqueue` returns
@@ -199,7 +204,7 @@ more than `Capacity` paths a build also fills the queue, and `Enqueue` returns
 ## Logging
 
 Every log line and every error the plugin returns or panics with starts with
-`elagoht/jobs:`, so one grep finds them all. Runs and handled items are logged
+`jobs:`, so one grep finds them all. Runs and handled items are logged
 at Debug, retries and drops at Warn, and final failures at Error, with the
 job's or queue's name as `job` or `queue`.
 
@@ -227,7 +232,7 @@ With `app.ListenAndServe()`, the plugin needs nothing more:
      running: `Shutdown` logs at Warn that it gave up, and returns. Its
      goroutine lives on until the function returns, but the plugin keeps none
      of its own waiting for it.
-   - Each queue with items left logs at Warn `elagoht/jobs: dropped queued items`,
+   - Each queue with items left logs at Warn `jobs: dropped queued items`,
      with the queue's name and the count. An item waiting for a retry when
      the runs' ctx ends counts as dropped too; it is not a failure, so
      `OnFailure` is not called. After a give-up, `abandoned` counts the items
@@ -333,3 +338,15 @@ Only the first of `OnServe` and `Start` does anything.
 - Metrics. Runs and failures are logged.
 - Priorities.
 - Delayed enqueue (`EnqueueAt`).
+
+## Changes
+
+### Changed in v0.2.0
+
+- One constructor: `jobs.New()` → `jobs.New(jobs.Options{})`, and
+  `jobs.NewWith(jobs.Config{…})` → `jobs.New(jobs.Options{…})`. The type
+  `Config` is now `Options`.
+- Every message, error and panic starts with `jobs:` instead of
+  `elagoht/jobs:`; update a log filter that matched the old prefix.
+- collage.json has a setup note: keep the plugin in a variable.
+- Requires collage v0.61.0.

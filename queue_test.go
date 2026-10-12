@@ -74,7 +74,7 @@ func expectItems(t *testing.T, r *recorder, want ...int) {
 }
 
 func TestQueue_RunsItems(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var mu sync.Mutex
 	seen := map[int]int{}
 	// Items 0 and 1 each wait for the other: they finish only if two workers
@@ -110,16 +110,16 @@ func TestQueue_RunsItems(t *testing.T) {
 			t.Fatalf("item %d handled %d times, want 1 (all: %v)", i, seen[i], seen)
 		}
 	}
-	if n := l.count(slog.LevelDebug, "elagoht/jobs: ran", "work"); n != 10 {
+	if n := l.count(slog.LevelDebug, "jobs: ran", "work"); n != 10 {
 		t.Fatalf("%d runs logged, want 10", n)
 	}
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "work"); n != 0 {
+	if n := l.count(slog.LevelError, "jobs: failed", "work"); n != 0 {
 		t.Fatalf("%d failures logged, want 0", n)
 	}
 }
 
 func TestQueue_Full(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r recorder
 	q := jobs.NewQueue(p, "small", r.fn, jobs.QueueOptions[int]{Capacity: 2})
 	for i := range 2 {
@@ -133,13 +133,13 @@ func TestQueue_Full(t *testing.T) {
 	if n := jobs.QueueLen(q); n != 2 {
 		t.Fatalf("%d queued, want 2", n)
 	}
-	if jobs.ErrQueueFull.Error() != "elagoht/jobs: queue full" {
+	if jobs.ErrQueueFull.Error() != "jobs: queue full" {
 		t.Fatalf("ErrQueueFull = %v", jobs.ErrQueueFull)
 	}
 }
 
 func TestQueue_DefaultCapacity(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r recorder
 	q := jobs.NewQueue(p, "big", r.fn, jobs.QueueOptions[int]{})
 	for i := range 1000 {
@@ -156,7 +156,7 @@ func TestQueue_DefaultCapacity(t *testing.T) {
 // and never hands the item to the handler. The refusal comes before the push:
 // with the store full, it is ErrDraining, not ErrQueueFull.
 func TestQueue_EnqueueAfterShutdown(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	entered := make(chan int, 4)
 	release := make(chan struct{})
 	var calls atomic.Int32
@@ -223,7 +223,7 @@ func TestQueue_EnqueueAfterShutdown(t *testing.T) {
 // The drain stops the scheduler, not the queues: the server still serves on
 // purpose, so an Enqueue then is accepted and handled.
 func TestQueue_DrainAccepts(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	entered := make(chan int, 4)
 	release := make(chan struct{})
 	q := jobs.NewQueue(p, "mail", func(_ context.Context, item int) error {
@@ -266,7 +266,7 @@ func TestQueue_DrainAccepts(t *testing.T) {
 // The worker that took an item retries it, and takes nothing else while it
 // waits for the backoff: with one worker, items keep their order.
 func TestQueue_SameWorkerRetries(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	r := recorder{fail: 1}
 	q := jobs.NewQueue(p, "ordered", r.fn, jobs.QueueOptions[int]{Workers: 1, MaxAttempts: 2})
 	_, clk := setup(t, p, "")
@@ -292,7 +292,7 @@ func TestQueue_SameWorkerRetries(t *testing.T) {
 }
 
 func TestQueue_RetryWithBackoff(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	r := recorder{fail: 2}
 	q := jobs.NewQueue(p, "flaky", r.fn, jobs.QueueOptions[int]{MaxAttempts: 3})
 	l, clk := setup(t, p, "")
@@ -324,19 +324,19 @@ func TestQueue_RetryWithBackoff(t *testing.T) {
 	if n := clk.Pending(); n != 0 {
 		t.Fatalf("%d timers pending after the success, want 0", n)
 	}
-	if n := l.count(slog.LevelWarn, "elagoht/jobs: failed, will retry", "flaky"); n != 2 {
+	if n := l.count(slog.LevelWarn, "jobs: failed, will retry", "flaky"); n != 2 {
 		t.Fatalf("%d retries logged, want 2", n)
 	}
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "flaky"); n != 0 {
+	if n := l.count(slog.LevelError, "jobs: failed", "flaky"); n != 0 {
 		t.Fatalf("%d failures logged, want 0", n)
 	}
-	if n := l.count(slog.LevelDebug, "elagoht/jobs: ran", "flaky"); n != 1 {
+	if n := l.count(slog.LevelDebug, "jobs: ran", "flaky"); n != 1 {
 		t.Fatalf("%d runs logged, want 1", n)
 	}
 }
 
 func TestQueue_OnFailure(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	r := recorder{fail: 100}
 	type failure struct {
 		item int
@@ -366,10 +366,10 @@ func TestQueue_OnFailure(t *testing.T) {
 		t.Fatalf("OnFailure(%d, %v), want (9, attempt 2 failed)", f.item, f.err)
 	}
 	expectItems(t, &r, 9, 9)
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "doomed"); n != 1 {
+	if n := l.count(slog.LevelError, "jobs: failed", "doomed"); n != 1 {
 		t.Fatalf("%d failures logged, want 1", n)
 	}
-	if n := l.count(slog.LevelWarn, "elagoht/jobs: failed, will retry", "doomed"); n != 1 {
+	if n := l.count(slog.LevelWarn, "jobs: failed, will retry", "doomed"); n != 1 {
 		t.Fatalf("%d retries logged, want 1", n)
 	}
 	if n := clk.Pending(); n != 0 {
@@ -378,7 +378,7 @@ func TestQueue_OnFailure(t *testing.T) {
 }
 
 func TestQueue_OneAttemptByDefault(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	r := recorder{fail: 100}
 	var onFailure atomic.Int32
 	q := jobs.NewQueue(p, "once", r.fn, jobs.QueueOptions[int]{
@@ -394,13 +394,13 @@ func TestQueue_OneAttemptByDefault(t *testing.T) {
 	if onFailure.Load() != 1 || clk.Pending() != 0 {
 		t.Fatalf("OnFailure %d times, %d timers pending; want 1 and 0", onFailure.Load(), clk.Pending())
 	}
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "once"); n != 1 {
+	if n := l.count(slog.LevelError, "jobs: failed", "once"); n != 1 {
 		t.Fatalf("%d failures logged, want 1", n)
 	}
 }
 
 func TestQueue_PanicRetried(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var calls atomic.Int32
 	q := jobs.NewQueue(p, "panicky", func(context.Context, int) error {
 		if calls.Add(1) == 1 {
@@ -414,7 +414,7 @@ func TestQueue_PanicRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitPending(t, clk, 1)
-	if n := l.count(slog.LevelWarn, "elagoht/jobs: failed, will retry", "panicky"); n != 1 {
+	if n := l.count(slog.LevelWarn, "jobs: failed, will retry", "panicky"); n != 1 {
 		t.Fatalf("%d retries logged after the panic, want 1", n)
 	}
 	clk.Advance(time.Second)
@@ -422,13 +422,13 @@ func TestQueue_PanicRetried(t *testing.T) {
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("%d calls, want 2", n)
 	}
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "panicky"); n != 0 {
+	if n := l.count(slog.LevelError, "jobs: failed", "panicky"); n != 0 {
 		t.Fatalf("%d failures logged, want 0", n)
 	}
 }
 
 func TestQueue_OnFailurePanicContained(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	r := recorder{fail: 100}
 	q := jobs.NewQueue(p, "bad-hook", r.fn, jobs.QueueOptions[int]{
 		OnFailure: func(context.Context, int, error) { panic("hook") },
@@ -442,13 +442,13 @@ func TestQueue_OnFailurePanicContained(t *testing.T) {
 	}
 	settled(t, q)
 	expectItems(t, &r, 0, 1) // the worker survived the first panic
-	if n := l.count(slog.LevelError, "elagoht/jobs: OnFailure panicked", "bad-hook"); n != 2 {
+	if n := l.count(slog.LevelError, "jobs: OnFailure panicked", "bad-hook"); n != 2 {
 		t.Fatalf("%d OnFailure panics logged, want 2", n)
 	}
 }
 
 func TestQueue_BeforeServe(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r recorder
 	q := jobs.NewQueue(p, "early", r.fn, jobs.QueueOptions[int]{})
 	if err := q.Enqueue(context.Background(), 1); err != nil { // before Init
@@ -475,7 +475,7 @@ func TestQueue_BeforeServe(t *testing.T) {
 // Workers start even when the serve ctx is already done, so that Shutdown can
 // finish what was queued before.
 func TestQueue_WorkersStartAfterEarlyDrain(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r recorder
 	q := jobs.NewQueue(p, "late", r.fn, jobs.QueueOptions[int]{})
 	setup(t, p, "")
@@ -531,28 +531,34 @@ func TestQueue_Misuse(t *testing.T) {
 		do   func(t *testing.T)
 	}{
 		{"job then queue", `"a"`, func(*testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			p.Every("a", time.Minute, nop)
 			jobs.NewQueue(p, "a", nopItem, jobs.QueueOptions[int]{})
 		}},
 		{"queue then job", `"a"`, func(*testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			jobs.NewQueue(p, "a", nopItem, jobs.QueueOptions[int]{})
 			p.Cron("a", "* * * * *", nop)
 		}},
 		{"queue then queue", `"a"`, func(*testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			jobs.NewQueue(p, "a", nopItem, jobs.QueueOptions[int]{})
 			jobs.NewQueue(p, "a", func(context.Context, string) error { return nil }, jobs.QueueOptions[string]{})
 		}},
-		{"empty name", "name", func(*testing.T) { jobs.NewQueue(jobs.New(), "", nopItem, jobs.QueueOptions[int]{}) }},
-		{"nil fn", "nil", func(*testing.T) { jobs.NewQueue[int](jobs.New(), "a", nil, jobs.QueueOptions[int]{}) }},
-		{"negative Workers", "Workers", func(*testing.T) { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{Workers: -1}) }},
-		{"negative Capacity", "Capacity", func(*testing.T) { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{Capacity: -1}) }},
-		{"negative MaxAttempts", "MaxAttempts", func(*testing.T) { jobs.NewQueue(jobs.New(), "a", nopItem, jobs.QueueOptions[int]{MaxAttempts: -1}) }},
+		{"empty name", "name", func(*testing.T) { jobs.NewQueue(jobs.New(jobs.Options{}), "", nopItem, jobs.QueueOptions[int]{}) }},
+		{"nil fn", "nil", func(*testing.T) { jobs.NewQueue[int](jobs.New(jobs.Options{}), "a", nil, jobs.QueueOptions[int]{}) }},
+		{"negative Workers", "Workers", func(*testing.T) {
+			jobs.NewQueue(jobs.New(jobs.Options{}), "a", nopItem, jobs.QueueOptions[int]{Workers: -1})
+		}},
+		{"negative Capacity", "Capacity", func(*testing.T) {
+			jobs.NewQueue(jobs.New(jobs.Options{}), "a", nopItem, jobs.QueueOptions[int]{Capacity: -1})
+		}},
+		{"negative MaxAttempts", "MaxAttempts", func(*testing.T) {
+			jobs.NewQueue(jobs.New(jobs.Options{}), "a", nopItem, jobs.QueueOptions[int]{MaxAttempts: -1})
+		}},
 		{"nil plugin", "plugin", func(*testing.T) { jobs.NewQueue(nil, "a", nopItem, jobs.QueueOptions[int]{}) }},
 		{"after Init", "after Init", func(t *testing.T) {
-			p := jobs.New()
+			p := jobs.New(jobs.Options{})
 			if err := newApp(t, p, "", &logs{}); err != nil {
 				t.Fatal(err)
 			}
@@ -573,8 +579,8 @@ func TestQueue_Misuse(t *testing.T) {
 				case error:
 					msg = v.Error()
 				}
-				if !strings.HasPrefix(msg, "elagoht/jobs: ") || !strings.Contains(msg, c.want) {
-					t.Fatalf("panic %q, want one prefixed elagoht/jobs: and naming %q", msg, c.want)
+				if !strings.HasPrefix(msg, "jobs: ") || !strings.Contains(msg, c.want) {
+					t.Fatalf("panic %q, want one prefixed jobs: and naming %q", msg, c.want)
 				}
 			}()
 			c.do(t)

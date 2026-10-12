@@ -11,7 +11,7 @@ import (
 )
 
 func TestEvery_TriggersOnSchedule(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Minute, r.fn)
 	_, clk := setup(t, p, "")
@@ -26,7 +26,7 @@ func TestEvery_TriggersOnSchedule(t *testing.T) {
 }
 
 func TestCron_UsesTimezone(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Cron("nightly", "0 3 * * *", r.fn)
 	clk := jobs.UseFakeClock(p, time.Date(2026, 10, 8, 23, 30, 0, 0, time.UTC)) // 02:30 in Istanbul
@@ -46,7 +46,7 @@ func TestCron_UsesTimezone(t *testing.T) {
 }
 
 func TestCron_UTCByDefault(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Cron("nightly", "0 3 * * *", r.fn)
 	_, clk := setup(t, p, "")
@@ -61,7 +61,7 @@ func TestCron_UTCByDefault(t *testing.T) {
 // Review Focus 1: a trigger that fires while the previous run is still in
 // progress is skipped, not queued.
 func TestEvery_SkipsWhileRunning(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	release := make(chan struct{})
 	entered := make(chan struct{}, 4)
 	p.Every("slow", time.Minute, func(ctx context.Context) error {
@@ -77,7 +77,7 @@ func TestEvery_SkipsWhileRunning(t *testing.T) {
 			close(release)
 		}
 	})
-	const skipped = "elagoht/jobs: skipped, the previous run is still in progress"
+	const skipped = "jobs: skipped, the previous run is still in progress"
 
 	clk.Advance(time.Minute)
 	<-entered
@@ -106,7 +106,7 @@ func TestEvery_SkipsWhileRunning(t *testing.T) {
 }
 
 func TestRunOnStart(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("warm", time.Hour, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
@@ -117,7 +117,7 @@ func TestRunOnStart(t *testing.T) {
 }
 
 func TestTimeout(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	got := make(chan error, 1)
 	p.Every("bounded", time.Minute, func(ctx context.Context) error {
 		<-ctx.Done()
@@ -134,11 +134,11 @@ func TestTimeout(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the job's ctx never ended")
 	}
-	eventually(t, func() bool { return l.count(slog.LevelError, "elagoht/jobs: failed", "bounded") == 1 }, "the failure log")
+	eventually(t, func() bool { return l.count(slog.LevelError, "jobs: failed", "bounded") == 1 }, "the failure log")
 }
 
 func TestFailureAndPanic(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var calls runs
 	p.Every("flaky", time.Minute, func(context.Context) error {
 		switch calls.n.Add(1) {
@@ -153,15 +153,15 @@ func TestFailureAndPanic(t *testing.T) {
 	serve(t, p, clk, 1)
 
 	step(t, p, clk, time.Minute, 1)
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "flaky"); n != 1 {
+	if n := l.count(slog.LevelError, "jobs: failed", "flaky"); n != 1 {
 		t.Fatalf("%d error logs after the error, want 1", n)
 	}
 	step(t, p, clk, time.Minute, 1)
-	if n := l.count(slog.LevelError, "elagoht/jobs: failed", "flaky"); n != 2 {
+	if n := l.count(slog.LevelError, "jobs: failed", "flaky"); n != 2 {
 		t.Fatalf("%d error logs after the panic, want 2", n)
 	}
 	step(t, p, clk, time.Minute, 1)
-	if n := l.count(slog.LevelDebug, "elagoht/jobs: ran", "flaky"); n != 1 {
+	if n := l.count(slog.LevelDebug, "jobs: ran", "flaky"); n != 1 {
 		t.Fatalf("%d successful runs after the panic, want 1", n)
 	}
 	expectRuns(t, p, &calls, 3) // not retried
@@ -171,26 +171,26 @@ func TestFailureAndPanic(t *testing.T) {
 // is the serve-time backstop: February 29 on a Sunday comes in 2032, more than
 // five years after t0.
 func TestCron_NeverAgain(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Cron("feb29-sunday", "0 0 29 2 */7", r.fn)
 	l, clk := setup(t, p, "")
 	serve(t, p, clk, 0)
 	eventually(t, func() bool {
-		return l.count(slog.LevelWarn, "elagoht/jobs: the schedule has no next time; the job stops", "feb29-sunday") == 1
+		return l.count(slog.LevelWarn, "jobs: the schedule has no next time; the job stops", "feb29-sunday") == 1
 	}, "the warning")
 	clk.Advance(24 * 365 * time.Hour)
 	expectRuns(t, p, &r, 0)
 	if n := clk.Pending(); n != 0 {
 		t.Fatalf("%d timers pending, want 0", n)
 	}
-	if n := l.count(slog.LevelWarn, "elagoht/jobs: the schedule has no next time; the job stops", "feb29-sunday"); n != 1 {
+	if n := l.count(slog.LevelWarn, "jobs: the schedule has no next time; the job stops", "feb29-sunday"); n != 1 {
 		t.Fatalf("%d warnings, want 1", n)
 	}
 }
 
 func TestNothingBeforeServe(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Minute, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
@@ -211,7 +211,7 @@ func TestNothingBeforeServe(t *testing.T) {
 }
 
 func TestDrainStopsScheduling(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Minute, r.fn)
 	_, clk := setup(t, p, "")
@@ -225,7 +225,7 @@ func TestDrainStopsScheduling(t *testing.T) {
 }
 
 func TestOnServe_CtxAlreadyDone(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Minute, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
@@ -238,7 +238,7 @@ func TestOnServe_CtxAlreadyDone(t *testing.T) {
 }
 
 func TestStartTwice(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	var r runs
 	p.Every("tick", time.Minute, r.fn).RunOnStart()
 	_, clk := setup(t, p, "")
@@ -257,7 +257,7 @@ func TestStartTwice(t *testing.T) {
 }
 
 func TestDraining(t *testing.T) {
-	p := jobs.New()
+	p := jobs.New(jobs.Options{})
 	_, clk := setup(t, p, "")
 	if jobs.Draining(p) {
 		t.Fatal("draining before start")

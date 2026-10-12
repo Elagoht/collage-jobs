@@ -18,21 +18,22 @@ import (
 // Name is the plugin's name.
 const Name = "elagoht/jobs"
 
-const version = "0.1.1"
+const version = "0.2.0"
 
 // ErrDraining is returned by Enqueue once the plugin's Shutdown has begun. The
 // drain alone does not refuse work: the server still serves then, on purpose.
-var ErrDraining = errors.New("elagoht/jobs: draining")
+var ErrDraining = errors.New("jobs: draining")
 
-// Config configures the plugin.
-type Config struct {
+// Options configures the plugin. Its section of the application's plugin
+// configuration is decoded over it.
+type Options struct {
 	Timezone string   `json:"timezone"` // IANA time zone cron expressions are read in, default "UTC"
 	Disabled []string `json:"disabled"` // names of scheduled jobs that do not run; an unknown name fails startup
 }
 
 // Plugin is the jobs plugin.
 type Plugin struct {
-	cfg   Config
+	cfg   Options
 	clock clock
 
 	// mu guards names, scheduled, queues, inited and running, and the write
@@ -74,12 +75,14 @@ var (
 	_ collage.ServeHook = (*Plugin)(nil)
 )
 
-// New returns the plugin with its defaults, which configuration may change.
-func New() *Plugin { return NewWith(Config{}) }
-
-// NewWith returns the plugin with cfg as the defaults configuration starts from.
-func NewWith(cfg Config) *Plugin {
-	return &Plugin{cfg: cfg, clock: realClock{}, names: map[string]bool{}}
+// New returns the plugin with opts as the starting point configuration is
+// decoded over. Keep it in a variable: jobs and queues are defined on it, with
+// Every, Cron and NewQueue, before the application starts.
+//
+//	jobsPlugin := jobs.New(jobs.Options{})
+//	jobsPlugin.Every("cleanup", time.Hour, cleanup)
+func New(opts Options) *Plugin {
+	return &Plugin{cfg: opts, clock: realClock{}, names: map[string]bool{}}
 }
 
 // Name returns Name.
@@ -104,7 +107,7 @@ type Job struct {
 // or Init has run.
 func (p *Plugin) Every(name string, d time.Duration, fn func(context.Context) error) *Job {
 	if d <= 0 {
-		panic(fmt.Sprintf("elagoht/jobs: job %q: the interval must be positive, got %v", name, d))
+		panic(fmt.Sprintf("jobs: job %q: the interval must be positive, got %v", name, d))
 	}
 	return p.define(name, every{d}, fn)
 }
@@ -116,17 +119,17 @@ func (p *Plugin) Every(name string, d time.Duration, fn func(context.Context) er
 func (p *Plugin) Cron(name, expr string, fn func(context.Context) error) *Job {
 	spec, err := parseCron(expr)
 	if err != nil {
-		panic(fmt.Sprintf("elagoht/jobs: job %q: %v", name, err))
+		panic(fmt.Sprintf("jobs: job %q: %v", name, err))
 	}
 	if !spec.possible() {
-		panic(fmt.Sprintf("elagoht/jobs: job %q: cron %q never matches: no month it names has a day it names", name, expr))
+		panic(fmt.Sprintf("jobs: job %q: cron %q never matches: no month it names has a day it names", name, expr))
 	}
 	return p.define(name, spec, fn)
 }
 
 func (p *Plugin) define(name string, s schedule, fn func(context.Context) error) *Job {
 	if fn == nil {
-		panic(fmt.Sprintf("elagoht/jobs: job %q: the function is nil", name))
+		panic(fmt.Sprintf("jobs: job %q: the function is nil", name))
 	}
 	j := &Job{p: p, name: name, sched: s, fn: fn}
 	p.register(name, func() { p.scheduled = append(p.scheduled, j) })
@@ -141,11 +144,11 @@ func (p *Plugin) register(name string, add func()) {
 	defer p.mu.Unlock()
 	switch {
 	case name == "":
-		panic("elagoht/jobs: a job or queue needs a name")
+		panic("jobs: a job or queue needs a name")
 	case p.inited:
-		panic(fmt.Sprintf("elagoht/jobs: %q defined after Init: define jobs and queues before the application starts", name))
+		panic(fmt.Sprintf("jobs: %q defined after Init: define jobs and queues before the application starts", name))
 	case p.names[name]:
-		panic(fmt.Sprintf("elagoht/jobs: the name %q is taken by another job or queue", name))
+		panic(fmt.Sprintf("jobs: the name %q is taken by another job or queue", name))
 	}
 	p.names[name] = true
 	add()
@@ -165,7 +168,7 @@ func (j *Job) RunOnStart() *Job {
 // negative, or after Init.
 func (j *Job) Timeout(d time.Duration) *Job {
 	if d < 0 {
-		panic(fmt.Sprintf("elagoht/jobs: job %q: the timeout must not be negative, got %v", j.name, d))
+		panic(fmt.Sprintf("jobs: job %q: the timeout must not be negative, got %v", j.name, d))
 	}
 	j.p.mu.Lock()
 	defer j.p.mu.Unlock()
@@ -177,7 +180,7 @@ func (j *Job) Timeout(d time.Duration) *Job {
 // checkOpen panics if Init has run. j.p.mu is held.
 func (j *Job) checkOpen(method string) {
 	if j.p.inited {
-		panic(fmt.Sprintf("elagoht/jobs: job %q: %s after Init: set it before the application starts", j.name, method))
+		panic(fmt.Sprintf("jobs: job %q: %s after Init: set it before the application starts", j.name, method))
 	}
 }
 
@@ -188,11 +191,11 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.inited {
-		return errors.New("elagoht/jobs: a Plugin value serves one App; create another with New")
+		return errors.New("jobs: a Plugin value serves one App; create another with New")
 	}
 	cfg, err := collage.PluginConfig(host, p.cfg)
 	if err != nil {
-		return fmt.Errorf("elagoht/jobs: config: %w", err)
+		return err
 	}
 	zone := cfg.Timezone
 	if zone == "" {
@@ -201,12 +204,12 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	loc, err := time.LoadLocation(zone)
 	if err != nil {
 		// A minimal image without zoneinfo fails the same way as a typo.
-		return fmt.Errorf(`elagoht/jobs: timezone %q: %w (if the name is right, the image may lack time zone data: import _ "time/tzdata" in main)`, zone, err)
+		return fmt.Errorf(`jobs: timezone %q: %w (if the name is right, the image may lack time zone data: import _ "time/tzdata" in main)`, zone, err)
 	}
 	disabled := map[string]bool{}
 	for _, name := range cfg.Disabled {
 		if !slices.ContainsFunc(p.scheduled, func(j *Job) bool { return j.name == name }) {
-			return fmt.Errorf("elagoht/jobs: disabled: no scheduled job is named %q", name)
+			return fmt.Errorf("jobs: disabled: no scheduled job is named %q", name)
 		}
 		disabled[name] = true
 	}
@@ -245,7 +248,7 @@ const giveUp = time.Second
 // returns. Such a run's goroutine lives on until the function returns, but the
 // plugin keeps no goroutine of its own waiting for it.
 //
-// Last, each queue that still has items logs at Warn "elagoht/jobs: dropped queued
+// Last, each queue that still has items logs at Warn "jobs: dropped queued
 // items". Its count is the items dropped: those left in the store, and those
 // waiting for a retry when the runs' ctx ended, which are dropped rather than
 // failed, so OnFailure is not called. Its abandoned is, after a give-up, the
@@ -283,7 +286,7 @@ func (p *Plugin) Shutdown(ctx context.Context) error {
 	for _, q := range queues {
 		dropped, abandoned := q.leftovers(gaveUp)
 		if dropped > 0 || abandoned > 0 {
-			p.log.Warn("elagoht/jobs: dropped queued items", "queue", q.queueName(), "count", dropped, "abandoned", abandoned)
+			p.log.Warn("jobs: dropped queued items", "queue", q.queueName(), "count", dropped, "abandoned", abandoned)
 		}
 	}
 	return nil
@@ -308,7 +311,7 @@ func (p *Plugin) wait(ctx context.Context) bool {
 	case <-timer.C:
 		// goroutines counts what is still going: the stuck runs, and for a
 		// queue's item, the worker running it.
-		p.log.Warn("elagoht/jobs: gave up waiting for runs that ignore their ctx", "goroutines", p.active.Count(), "waited", giveUp)
+		p.log.Warn("jobs: gave up waiting for runs that ignore their ctx", "goroutines", p.active.Count(), "waited", giveUp)
 		return true
 	}
 }
@@ -328,7 +331,7 @@ func (g *group) Add(d int) {
 	g.n += d
 	switch {
 	case g.n < 0:
-		panic("elagoht/jobs: negative group count")
+		panic("jobs: negative group count")
 	case g.n == 0 && g.idle != nil:
 		close(g.idle)
 		g.idle = nil
