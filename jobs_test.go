@@ -344,7 +344,7 @@ func TestErrDraining(t *testing.T) {
 
 func TestNameAndVersion(t *testing.T) {
 	p := jobs.New()
-	if p.Name() != "elagoht/jobs" || p.Version() != "0.1.0" {
+	if p.Name() != "elagoht/jobs" || p.Version() != "0.1.1" {
 		t.Fatalf("Name %q Version %q", p.Name(), p.Version())
 	}
 }

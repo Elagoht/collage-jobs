@@ -18,7 +18,7 @@ import (
 // Name is the plugin's name.
 const Name = "elagoht/jobs"
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 // ErrDraining is returned by Enqueue once the plugin's Shutdown has begun. The
 // drain alone does not refuse work: the server still serves then, on purpose.

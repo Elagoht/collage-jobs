@@ -63,11 +63,7 @@ func TestBuild_RunsNothing(t *testing.T) {
 	}
 	a := newServeApp(t, p, collage.ServerConfig{Host: "localhost", Port: 3000}, &logs{})
 
-	builder, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := builder.Build(context.Background()); err != nil {
+	if _, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	// A job or worker started by mistake would run on a goroutine that may not
